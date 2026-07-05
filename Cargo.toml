@@ -2,33 +2,23 @@
 name = "igloo"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80.1"
 
-authors = ["Your Name <you@example.com>"]
-description = "A Rust-based data caching layer for Trino and Iceberg."
+authors = ["Igloo Contributors"]
+description = "A distributed SQL query engine with an intelligent caching layer, built on DataFusion, Arrow and ADBC."
 license = "MIT"
 
 [dependencies]
-# adbc-rs = { path = "adbc-rs/core" }
-arrow = "50.0.0" # Downgraded for Rust 1.75.0 compatibility with DataFusion 39.0.0
-tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread"] } # Specific features
-async-trait = "0.1.88"
-datafusion = "39.0.0" # Downgraded for Rust 1.75.0 compatibility
-libloading = "0.8" # For FFI
-reqwest = { version = "0.11.27", features = ["blocking"] } # Downgraded for Rust 1.75.0 compatibility
-adbc_core = { version = "0.16.0", features = ["driver_manager"] } # Trying version 0.16.0 for Rust 1.75.0 compatibility
-tokio-postgres = { version = "0.7.13", features = ["with-chrono-0_4"] } # Postgres driver
-tracing = "0.1" # Structured logging framework
-tracing-subscriber = { version = "0.3", features = ["fmt"] } # Tracing subscriber
-thiserror = "1.0" # Error handling
-url = "2.5.2" # For url::ParseError in IglooError
-log = "0.4.22" # Logging facade
-env_logger = "0.11.3" # Logger implementation
-scopeguard = "1.2.0" # RAII guard
-chrono = "0.4.38" # Date/time library, for tokio-postgres
-num_cpus = "1.16.0" # To get number of CPUs for DataFusion config
-sqlparser = "0.36.1" # Pinning version compatible with DataFusion 39.0.0 and Rust 1.75.0
-chrono-tz = "0.8.6" # Pinning version compatible with DataFusion 39.0.0 and Rust 1.75.0
-icu_properties = "1.2.0" # Pinning version for Rust 1.75.0 compatibility (related to chrono-tz)
-native-tls = "0.2.11" # Pinning version for Rust 1.75.0 compatibility (related to reqwest)
-icu_normalizer = "1.2.0" # Pinning version for Rust 1.75.0 compatibility (related to chrono-tz)
-icu_locid = "1.2.0" # Pinning version for Rust 1.75.0 compatibility (related to chrono-tz)
+# All arrow crates in the tree resolve to the same major version (53):
+# datafusion 44 depends on arrow ^53.3 and adbc_core 0.16 on arrow-array ^53.1.
+arrow = "53"
+datafusion = "44"
+adbc_core = { version = "0.16", features = ["driver_manager"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+async-trait = "0.1"
+chrono = "0.4"
+thiserror = "1"
+log = "0.4"
+env_logger = "0.11"
+num_cpus = "1"

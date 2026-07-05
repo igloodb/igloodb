@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:15
@@ -29,12 +27,6 @@ services:
       IGLOO_POSTGRES_URI: postgres://postgres:postgres@postgres:5432/mydb
       IGLOO_PARQUET_PATH: /app/dummy_iceberg_cdc/
       IGLOO_CDC_PATH: /app/dummy_iceberg_cdc
-    volumes:
-      - .:/app:cached  # Use :cached for better macOS performance
-    working_dir: /app
-    command: /app/igloo
-    tty: true
-    stdin_open: true
 
 volumes:
   pgdata:

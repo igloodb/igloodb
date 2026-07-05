@@ -16,6 +16,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Cache cargo registry and build artifacts
+      uses: Swatinem/rust-cache@v2
     - name: Check formatting
       run: cargo fmt --all -- --check
     - name: Run Clippy

@@ -102,24 +102,21 @@ Running Igloo locally requires you to manage dependencies and environment setup 
 ## 🏗️ Example Code
 
 ```rust
-mod cache_layer;
-mod cdc_sync;
-mod datafusion_engine;
-pub mod postgres_table;
-
 use cache_layer::Cache;
 use cdc_sync::CdcListener;
+use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion_engine::DataFusionEngine;
-use tokio::runtime::Runtime;
 
-fn main() {
+#[tokio::main]
+async fn main() -> errors::Result<()> {
     let mut cache = Cache::new();
-    let cdc = CdcListener::new("s3://my-bucket/iceberg-cdc");
+    let cdc = CdcListener::new("./dummy_iceberg_cdc");
 
-    let parquet_path = "./dummy_iceberg_cdc/";
-    let postgres_conn = "host=localhost user=postgres password=postgres dbname=mydb";
-    let rt = Runtime::new().unwrap();
-    let engine = rt.block_on(DataFusionEngine::new(parquet_path, postgres_conn));
+    let engine = DataFusionEngine::new(
+        "./dummy_iceberg_cdc/",
+        "postgres://postgres:postgres@localhost:5432/mydb",
+    )
+    .await?;
 
     let query = "SELECT i.user_id, i.data, p.extra_info \
                  FROM iceberg i \
@@ -127,16 +124,27 @@ fn main() {
                  WHERE i.user_id = 42";
 
     if let Some(result) = cache.get(query) {
-        println!("Cache hit:\n{:?}", result);
+        println!("Cache hit:\n{}", result);
     } else {
-        let result = rt.block_on(engine.query(query));
+        let batches = engine.query(query).await?;
+        let result = pretty_format_batches(&batches)?.to_string();
         cache.set(query, &result);
-        println!("Cache miss. Executed with DataFusion:\n{:?}", result);
+        println!("Cache miss. Executed with DataFusion:\n{}", result);
     }
 
-    // (In production, CDC sync should run asynchronously)
+    // Invalidates cached results when CDC events are found.
+    // (In production, CDC sync should run asynchronously.)
     cdc.sync(&mut cache);
+    Ok(())
 }
+```
+
+## 🧪 Development
+
+```sh
+cargo test                                            # unit tests (no external services needed)
+cargo fmt --all -- --check                            # formatting (enforced by CI)
+cargo clippy --all-targets --all-features -- -D warnings  # lints (enforced by CI)
 ```
 
 ## 🛠️ Environment Variable Reference
@@ -152,8 +160,8 @@ Igloo's behavior is controlled by several environment variables. When running lo
 
 *   `IGLOO_POSTGRES_URI`:
     *   **Purpose:** Specifies the connection string for the PostgreSQL database if `DATABASE_URL` is not set.
-    *   **Default (in code):** `host=localhost user=postgres password=postgres dbname=mydb`
-    *   **Note:** The format for `DATABASE_URL` (URI scheme) is generally preferred over the keyword/value format, especially for broader compatibility.
+    *   **Default (in code):** `postgres://postgres:postgres@localhost:5432/mydb`
+    *   **Note:** Both the URI scheme and the keyword/value format (`host=... user=...`) are accepted for the DataFusion Postgres table; the ADBC driver requires the URI scheme.
 
 *   `IGLOO_PARQUET_PATH`:
     *   **Purpose:** Defines the file system path to the directory containing Parquet files, which represent the Iceberg table data for this project.
@@ -187,15 +195,6 @@ Igloo relies on ADBC C++ drivers (such as the PostgreSQL driver) via Rust's Fore
         export TEST_ADBC_POSTGRESQL_URI="postgresql://user:password@localhost:5432/dbname_test"
         ```
     *   Ensure this points to a database that can be used for testing (it might get cleaned or have specific test data).
-
----
-*The old "Environment Setup" section's content has been reorganized and integrated above.*
-The following subsections were removed as their content is now part of the new structure:
-- "1. Set `LD_LIBRARY_PATH`" (merged into ADBC Driver Configuration)
-- "2. Set `TEST_ADBC_POSTGRESQL_URI` (for tests)" (merged into Test Configuration)
-- "3. Configure Igloo Environment Variables" (merged into General Configuration)
-The note "Ensure your local Parquet/Iceberg and Postgres paths are accessible in your config or .env." is now covered by the "Locally (without Docker)" subsection.
----
 
 ## ✅ Features
 

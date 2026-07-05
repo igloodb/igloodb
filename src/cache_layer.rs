@@ -4,37 +4,75 @@
 // if storage involved I/O or other fallible operations.
 use std::collections::HashMap;
 
-// Potentially add: use crate::errors::Result if cache operations become fallible.
-
+#[derive(Debug, Default)]
 pub struct Cache {
     store: HashMap<String, String>, // Key: query string, Value: serialized result string
 }
 
 impl Cache {
     pub fn new() -> Self {
-        // Using log::debug here assumes that the log facade is available
-        // and configured appropriately by the main application.
-        // If this module were to be used more independently, direct logging setup
-        // or passing a logger might be considered.
         log::debug!("Initializing new in-memory cache instance.");
-        Self {
-            store: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn get(&self, query: &str) -> Option<&String> {
-        // log::trace!("Cache GET attempt for query: {}", query); // trace is more appropriate for frequent calls
-        let result = self.store.get(query);
-        if result.is_some() {
-            // log::debug!("Cache HIT for query: {}", query);
-        } else {
-            // log::debug!("Cache MISS for query: {}", query);
-        }
-        result
+        self.store.get(query)
     }
 
     pub fn set(&mut self, query: &str, result: &str) {
-        // log::debug!("Cache SET for query: {}. Result length: {}", query, result.len());
         self.store.insert(query.to_string(), result.to_string());
+    }
+
+    /// Removes every cached entry. Used when CDC signals that underlying
+    /// data changed and cached results can no longer be trusted.
+    pub fn clear(&mut self) {
+        let evicted = self.store.len();
+        self.store.clear();
+        log::debug!("Cache cleared; {} entries evicted.", evicted);
+    }
+
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.store.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cache;
+
+    #[test]
+    fn get_returns_none_for_missing_key() {
+        let cache = Cache::new();
+        assert!(cache.get("SELECT 1").is_none());
+    }
+
+    #[test]
+    fn set_then_get_round_trips() {
+        let mut cache = Cache::new();
+        cache.set("SELECT 1", "result");
+        assert_eq!(cache.get("SELECT 1").map(String::as_str), Some("result"));
+    }
+
+    #[test]
+    fn set_overwrites_existing_entry() {
+        let mut cache = Cache::new();
+        cache.set("SELECT 1", "old");
+        cache.set("SELECT 1", "new");
+        assert_eq!(cache.get("SELECT 1").map(String::as_str), Some("new"));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn clear_evicts_all_entries() {
+        let mut cache = Cache::new();
+        cache.set("a", "1");
+        cache.set("b", "2");
+        cache.clear();
+        assert!(cache.is_empty());
+        assert!(cache.get("a").is_none());
     }
 }
