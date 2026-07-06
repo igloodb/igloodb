@@ -1,17 +1,17 @@
 # Use specific Rust version with build dependencies
-FROM rust:1.87 as builder
-
-# Install minimal system dependencies for build
-RUN apt-get update && apt-get install -y pkg-config libssl-dev build-essential && rm -rf /var/lib/apt/lists/*
+FROM rust:1.87 AS builder
 
 WORKDIR /app
 
-# Caching dependencies: copy only Cargo files first
+# Build dependencies first so they are cached independently of source changes.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN mkdir src \
+    && echo "fn main() {}" > src/main.rs \
+    && cargo build --release \
+    && rm -rf src target/release/igloo target/release/deps/igloo-*
 
-# Now copy the real source code
-COPY . .
+# Now copy the real source code and build the actual binary.
+COPY src ./src
 RUN cargo build --release
 
 # Create minimal runtime image
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 
 WORKDIR /app
 
-# Only copy what’s needed
+# Only copy what's needed
 COPY --from=builder /app/target/release/igloo /app/igloo
 COPY dummy_iceberg_cdc ./dummy_iceberg_cdc
 

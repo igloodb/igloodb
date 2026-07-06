@@ -1,19 +1,20 @@
 // src/adbc_postgres.rs
 use adbc_core::driver_manager::ManagedDriver;
 use adbc_core::options::{AdbcVersion, OptionDatabase};
-// Removed unused AdbcConnectionTrait, AdbcDatabaseTrait, Driver, AdbcStatementTrait
+use adbc_core::{Connection, Database, Driver, Statement};
 use arrow::array::{
     Array, BooleanArray, Date32Array, Float64Array, GenericBinaryArray, Int32Array, StringArray,
     TimestampNanosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use arrow::record_batch::{RecordBatch, RecordBatchReader}; // RecordBatchReader is a trait now
+use arrow::record_batch::RecordBatch;
 
 // Using our project's error types
 use crate::errors::{IglooError, Result};
 
 pub async fn adbc_postgres_query_example(uri: &str, sql: &str) -> Result<()> {
-    log::info!(target: "adbc_example", "Attempting ADBC query. URI: {}, SQL: {}", uri, sql);
+    // The URI is deliberately not logged: it may embed credentials.
+    log::info!(target: "adbc_example", "Attempting ADBC query. SQL: {}", sql);
 
     // Load the Postgres ADBC driver dynamically
     // Ensure the .so/.dylib/.dll is in your LD_LIBRARY_PATH/DYLD_LIBRARY_PATH/PATH
@@ -25,19 +26,16 @@ pub async fn adbc_postgres_query_example(uri: &str, sql: &str) -> Result<()> {
     let mut database = driver.new_database_with_opts(opts)?;
 
     let mut connection = database.new_connection()?;
-    log::info!(target: "adbc_example", "ADBC Connection established to URI: {}", uri);
+    log::info!(target: "adbc_example", "ADBC connection established.");
 
     let mut statement = connection.new_statement()?;
     statement.set_sql_query(sql)?;
 
-    // For adbc_core 0.6.0 and later, execute_query returns a tuple
-    let (_schema, mut reader, _rows_affected) = statement.execute_query()?;
-    // If using an older version (e.g. 0.3.0), it might be:
-    // let mut reader = statement.execute()?;
+    let reader = statement.execute()?;
 
     log::info!(target: "adbc_example", "ADBC statement executed. Reading results for SQL: {}", sql);
 
-    // The reader is an AdbcRecordBatchReader which itself is a RecordBatchReader (iterator)
+    // The reader is a RecordBatchReader, i.e. an iterator of RecordBatch results.
     let collected_batches_result: std::result::Result<Vec<RecordBatch>, arrow::error::ArrowError> =
         reader.collect();
 
