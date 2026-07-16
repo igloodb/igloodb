@@ -2,22 +2,47 @@
 //! In-memory query-result cache: Arrow-native, bounded, thread-safe.
 //!
 //! Values are the actual Arrow record batches a query produced (not
-//! display strings). Keys are whitespace-normalized SQL text — an interim
-//! scheme until plan fingerprinting lands (roadmap F1.4). Entries expire
-//! after a TTL and the least-recently-used entry is evicted once the
-//! configured capacity is reached.
+//! display strings). Keys are canonicalized SQL text — a parse round-trip
+//! with a lexical fallback, an interim scheme until plan fingerprinting
+//! lands (roadmap F1.4). Entries expire after a TTL and the
+//! least-recently-used entry is evicted once the configured capacity is
+//! reached.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::sql::sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 
-/// Normalizes SQL text for cache keying: trims, drops a trailing `;`, and
+/// Canonicalizes SQL text for cache keying.
+///
+/// Primary path: parse with sqlparser's [`PostgreSqlDialect`] (re-exported
+/// by DataFusion — no extra dependency) and use the statements' canonical
+/// `Display` form, so whitespace, keyword casing, and trailing semicolons
+/// all normalize away — "select 1", "SELECT  1" and "SELECT 1;" share one
+/// key. Unquoted identifier case is deliberately NOT folded: that failure
+/// mode is a spurious miss (re-execution), never a wrong hit.
+///
+/// Fallback: input sqlparser cannot parse (pgwire clients may send
+/// anything) is normalized lexically by [`normalize_lexical`] so non-SQL
+/// keys still cache consistently.
+pub fn normalize_query(sql: &str) -> String {
+    match Parser::parse_sql(&PostgreSqlDialect {}, sql) {
+        Ok(statements) if !statements.is_empty() => statements
+            .iter()
+            .map(|statement| statement.to_string())
+            .collect::<Vec<_>>()
+            .join("; "),
+        _ => normalize_lexical(sql),
+    }
+}
+
+/// Lexical fallback normalization: trims, drops a trailing `;`, and
 /// collapses whitespace runs to single spaces — but never inside quoted
 /// string literals (`'...'`) or quoted identifiers (`"..."`), where
 /// whitespace is significant.
-pub fn normalize_query(sql: &str) -> String {
+fn normalize_lexical(sql: &str) -> String {
     #[derive(PartialEq)]
     enum QuoteState {
         None,
@@ -299,6 +324,31 @@ mod tests {
         // survive normalization.
         let sql = "SELECT 'it''s  x'  FROM t";
         assert_eq!(normalize_query(sql), "SELECT 'it''s  x' FROM t");
+    }
+
+    #[test]
+    fn normalization_folds_keyword_case() {
+        // Only the parse round-trip gives this: keyword case folds while
+        // literal case (tested above) stays significant.
+        assert_eq!(normalize_query("select 1"), normalize_query("SELECT  1"));
+
+        let cache = small_cache();
+        cache.set("SELECT  1", vec![batch(1)]);
+        assert!(cache.get("select 1").is_some(), "keyword-case variant hits");
+    }
+
+    #[test]
+    fn normalization_falls_back_for_non_sql() {
+        // Unparseable input takes the lexical path and still keys
+        // consistently (pgwire clients may send anything).
+        assert_eq!(
+            normalize_query("  not sql   at all!!  "),
+            normalize_query("not sql at all!!")
+        );
+
+        let cache = small_cache();
+        cache.set("not sql at all!!", vec![batch(1)]);
+        assert!(cache.get("  not sql   at all!!  ").is_some());
     }
 
     // --- basic behavior ---
