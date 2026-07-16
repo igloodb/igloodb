@@ -39,6 +39,29 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check licenses and security advisories
+      uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        command: check
+
+  coverage:
+    runs-on: ubuntu-latest
+    # Informational for now (roadmap F0.1): surfaces the coverage trend
+    # without blocking merges. Flip to blocking once a baseline exists.
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+    - name: Cache cargo registry and build artifacts
+      uses: Swatinem/rust-cache@v2
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+    - name: Report unit-test coverage
+      run: cargo llvm-cov --summary-only
+
   integration:
     runs-on: ubuntu-latest
     services:

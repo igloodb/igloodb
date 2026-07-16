@@ -46,8 +46,8 @@ Build on the unit-test baseline from PR #12 (cache, CDC sync, identifier quoting
 - [ ] `cargo test` runs unit tests covering: cache get/set/eviction semantics (partially in place), error-type conversions, and SQL-to-table-dependency extraction (once F2.2 lands, tests extend to it).
 - [x] An integration test suite executes a federated query (Parquet ⋈ Postgres) against a live PostgreSQL and asserts on the Arrow results — not on log output. *(Implemented as `tests/postgres_federation.rs`, gated on `IGLOO_TEST_POSTGRES_URI` so plain `cargo test` stays hermetic; CI provides a Postgres service container. Testcontainers can replace the gate later if per-test isolation is needed.)*
 - [x] CI runs fmt + clippy (`-D warnings`) + unit tests **and** the integration suite on every PR (integration runs as a separate job with a Postgres service).
-- [ ] A regression test exists for every bug fixed from this point forward (enforced by review checklist in `CONTRIBUTING.md`).
-- [ ] Code coverage is measured (e.g. `cargo-llvm-cov`) and reported on PRs; no hard threshold initially, but the trend is visible.
+- [x] A regression test exists for every bug fixed from this point forward (enforced by the Testing Requirements section in `CONTRIBUTING.md`).
+- [ ] Code coverage is measured (e.g. `cargo-llvm-cov`) and reported on PRs; no hard threshold initially, but the trend is visible. *(A non-blocking `coverage` CI job is in place; tick once it proves itself and the trend is actually being watched.)*
 
 ### F0.2 Workspace layout and dependency hygiene
 
@@ -56,7 +56,7 @@ PR #12 already did the rescue work (DataFusion 39→44, one Arrow major across t
 **Acceptance criteria**
 - [ ] The build is a Cargo workspace; `igloo-cache` and `igloo-connectors` compile and pass their tests without the server crate.
 - [ ] MSRV is enforced in CI (a dedicated MSRV job), and a documented policy states how closely DataFusion/Arrow track upstream releases (e.g. within one major version).
-- [ ] `cargo deny` (or equivalent) runs in CI for license/advisory checks; the Dependabot findings currently open against main are resolved or explicitly waived.
+- [x] `cargo deny` (or equivalent) runs in CI for license/advisory checks; the Dependabot findings currently open against main are resolved or explicitly waived. *(All five vulnerabilities fixed via `cargo update`; the unmaintained `paste` advisory is waived in `deny.toml` with rationale until the next arrow/datafusion major.)*
 - [ ] Behavior parity across any future major upgrade: the federated join demo (Parquet ⋈ Postgres) produces identical results, proven by an integration test that exists *before* the upgrade lands (depends on F0.1).
 
 ### F0.3 Fail-fast configuration system
