@@ -82,7 +82,13 @@ jobs:
     - uses: actions/checkout@v4
     - name: Cache cargo registry and build artifacts
       uses: Swatinem/rust-cache@v2
+    # Seeds my_pg_table for the in-crate integration_* tests (the
+    # federation test creates and drops its own tables).
+    - name: Seed integration database
+      run: psql 'postgres://postgres:postgres@localhost:5432/igloo_test' -f scripts/seed_test_db.sql
     - name: Run integration tests
-      run: cargo test --test postgres_federation -- --nocapture
+      run: |
+        cargo test --lib integration_ -- --nocapture
+        cargo test --test postgres_federation -- --nocapture
       env:
         IGLOO_TEST_POSTGRES_URI: postgres://postgres:postgres@localhost:5432/igloo_test

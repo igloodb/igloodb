@@ -35,7 +35,7 @@ jobs:
           <body>
           <header>
           <h1>Igloo</h1>
-          <p>A distributed SQL query engine with an intelligent caching layer, built on DataFusion, Arrow and ADBC.</p>
+          <p>An experimental SQL query engine with an intelligent caching layer, built on DataFusion, Arrow and ADBC.</p>
           </header>
           <nav>
           <ul>

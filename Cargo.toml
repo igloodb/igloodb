@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.80.1"
 
 authors = ["Igloo Contributors"]
-description = "A distributed SQL query engine with an intelligent caching layer, built on DataFusion, Arrow and ADBC."
+description = "An experimental SQL query engine with an intelligent caching layer, built on DataFusion, Arrow and ADBC."
 license = "MIT"
 
 [dependencies]

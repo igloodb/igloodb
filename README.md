@@ -1,13 +1,13 @@
 # 🍙 Igloo
 
-Igloo is a distributed SQL query engine with an intelligent caching layer, built in Rust. It connects to external databases via ADBC drivers, leveraging DataFusion for query execution and Apache Arrow for in-memory data representation. Igloo caches query results and keeps them up to date using Change Data Capture (CDC) stored in the Iceberg format.
+Igloo is an experimental, single-node SQL query engine with an intelligent caching layer, built in Rust. It connects to external databases via ADBC drivers, leveraging DataFusion for query execution and Apache Arrow for in-memory data representation. Igloo caches query results and keeps them up to date using Change Data Capture (CDC) stored in the Iceberg format.
 
 
 ## 🏗️ How Igloo Works
 
-- **Data Querying:** Igloo uses ADBC drivers (via Rust FFI) to connect to external databases (e.g., PostgreSQL) and query data efficiently through Apache DataFusion. This enables high-performance, Arrow-native SQL execution across multiple sources.
-- **Materialized Views & Auto-Cache:** Apache Iceberg is leveraged to maintain materialized views and track data changes. This allows Igloo to update cached query results automatically and materialized views in response to underlying data changes, ensuring freshness and consistency.
-- **Smart Caching:** Query results are cached in memory (with pluggable backends planned), and cache invalidation/refresh is driven by Change Data Capture (CDC) events from Iceberg.
+- **Data Querying:** Apache DataFusion queries PostgreSQL through a custom `TableProvider` built on `tokio-postgres`, with conservative filter pushdown (exactly-equivalent predicates only) translated into the generated SQL. A separate, experimental ADBC FFI path also exists as a standalone example — it is not wired into DataFusion.
+- **Materialized Views & Auto-Cache:** Today the "iceberg" table is a plain directory of Parquet files (no Iceberg manifests, snapshots, or materialized views), and cache-invalidating change events are a directory of JSON files. Real Apache Iceberg integration is planned — see Roadmap.
+- **Smart Caching:** Query results are cached in memory (with pluggable backends planned), and cache invalidation/refresh is driven by Change Data Capture (CDC) events read from JSON files (real Iceberg-based CDC is planned — see Roadmap).
 
 ## 🧩 Architecture Overview
 
@@ -38,8 +38,8 @@ flowchart LR
 
 - 🧠 **Query Engine:** Apache DataFusion — Arrow-native SQL execution
 - 💾 **Cache Layer:** In-memory cache (MVP), pluggable (e.g., Sled/RocksDB)
-- 🔄 **CDC Integration:** Monitors Iceberg CDC streams and invalidates/updates cache entries
-- 📦 **Data Format:** Apache Arrow in memory, Parquet on disk (from Iceberg)
+- 🔄 **CDC Integration:** Monitors a directory of JSON CDC event files and invalidates/updates cache entries (real Iceberg CDC streams are planned)
+- 📦 **Data Format:** Apache Arrow in memory, Parquet files on disk (a plain directory today, not a real Iceberg table; real Iceberg integration is planned)
 
 ## 🚀 Running the Project
 
@@ -220,20 +220,21 @@ Igloo relies on ADBC C++ drivers (such as the PostgreSQL driver) via Rust's Fore
 
 ### Test Configuration
 
-*   `TEST_ADBC_POSTGRESQL_URI` (for tests):
-    *   **Purpose:** Specifies the PostgreSQL connection URI specifically for running integration tests (e.g., via `cargo test`).
-    *   **Example:**
+*   `IGLOO_TEST_POSTGRES_URI` (for integration tests):
+    *   **Purpose:** Points the integration tests in `src/postgres_table.rs` at a live PostgreSQL instance. When unset, those tests print a note to stderr and skip, so a plain `cargo test` stays green without a database.
+    *   **Local flow:**
         ```bash
-        export TEST_ADBC_POSTGRESQL_URI="postgresql://user:password@localhost:5432/dbname_test"
+        psql 'postgres://postgres:postgres@localhost:5432/mydb' -f scripts/seed_test_db.sql
+        IGLOO_TEST_POSTGRES_URI='postgres://postgres:postgres@localhost:5432/mydb' cargo test
         ```
-    *   Ensure this points to a database that can be used for testing (it might get cleaned or have specific test data).
 
 ## ✅ Features
 
 - ⚡ Fast SQL Execution with Apache DataFusion
-- 🧊 Smart Result Caching using query fingerprints
-- 🔄 CDC-Driven Invalidation from Iceberg logs
+- 🧊 Smart Result Caching keyed by canonicalized SQL (parse round-trip)
+- 🔄 CDC-Driven Invalidation from JSON event files (Iceberg planned)
 - 🔌 Join Support for Postgres + Arrow datasets
+- ⬇️ Conservative filter pushdown to PostgreSQL (exactly-equivalent predicates only)
 - 🧪 Designed for extensibility (remote cache, metrics, etc.)
 
 ## 🔮 Roadmap

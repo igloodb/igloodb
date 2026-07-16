@@ -1,6 +1,6 @@
 # Igloo Architecture
 
-Igloo is a single-crate, single-process proof-of-concept SQL query engine with an in-memory result cache. It uses Apache DataFusion for SQL execution over two registered tables — a Parquet-backed "iceberg" table and a custom `tokio-postgres`-backed `pg_table` provider — caches the pretty-printed result of one hardcoded demo query by exact string, runs a separate ADBC FFI test query against PostgreSQL, and invalidates the whole cache when a file-based CDC listener finds any JSON event. Several README claims (distributed, ADBC-through-DataFusion, Iceberg materialized views, query-fingerprint caching) are aspirational and not implemented; see the discrepancies noted throughout.
+Igloo is a single-crate, single-process proof-of-concept SQL query engine with an in-memory result cache. It uses Apache DataFusion for SQL execution over two registered tables — a Parquet-backed "iceberg" table and a custom `tokio-postgres`-backed `pg_table` provider with conservative filter pushdown — caches the pretty-printed result of one hardcoded demo query keyed by canonicalized SQL text, runs a separate ADBC FFI test query against PostgreSQL, and invalidates the whole cache when a file-based CDC listener finds any JSON event. The README's formerly aspirational claims (distributed, ADBC-through-DataFusion, Iceberg materialized views) were corrected in this branch to describe the actual state; Iceberg integration remains roadmap-only.
 
 ## Directory Structure
 
@@ -16,7 +16,11 @@ igloodb/
 ├── docker-compose.yml       # postgres:15 + igloo services
 ├── .dockerignore
 ├── .gitignore
-├── .github/workflows/rust.yml   # CI: fmt, clippy -D warnings, build, test
+├── .github/workflows/
+│   ├── rust.yml             # CI: fmt, clippy -D warnings, docs, build, test (with live Postgres service)
+│   └── docs.yml             # GitHub Pages: rustdoc + this document
+├── scripts/
+│   └── seed_test_db.sql     # single source of truth for integration-test data (CI + local)
 ├── dummy_iceberg_cdc/
 │   └── event1.json          # sole CDC event fixture; NO .parquet files ship here
 ├── docs/
@@ -54,16 +58,16 @@ Tests: one `#[tokio::test]` writes a temp Parquet file and asserts `iceberg` is 
 
 ### `src/postgres_table.rs` — custom TableProvider over PostgreSQL
 Responsibility: expose a live Postgres table to DataFusion as an Arrow-producing `TableProvider`.
-Public API: `struct PostgresTable` (`:27-32`); `async fn try_new(conn_str, table_name, schema) -> IglooResult<Self>` (`:37`); `impl TableProvider` (`:56-232`). `quote_ident` is a private helper (`:22-24`).
+Public API: `struct PostgresTable` (`:245-250`); `async fn try_new(conn_str, table_name, schema) -> IglooResult<Self>` (`:255`); `impl TableProvider` (`:274-471`). Private pure helpers: `quote_ident` (`:23-25`), the filter-translation machinery `literal_to_sql`/`column_to_sql`/`comparison_to_sql`/`try_expr_to_sql` (`:50-187`), and the SQL assembler `build_scan_sql` (`:203-242`).
 Key decisions:
-- `try_new` connects with **`NoTls`** (`:38`) and spawns the connection driver task in the background for the client's lifetime (`:42-46`); the `Client` is held in an `Arc` (`:49`).
-- `scan` ignores pushed-down filters entirely — `_filters` is unused and DataFusion applies predicates above the scan (`:74`); `supports_filters_pushdown` is not overridden, so all filters default to `Unsupported`.
-- `scan` honors projection (`:77-80`) and a pushed-down `LIMIT` appended verbatim with no `ORDER BY` (`:82`, `:118-123`).
-- Empty projection (e.g. `SELECT COUNT(*)`) is special-cased to `SELECT COUNT(*) FROM (SELECT 1 FROM <t>[LIMIT n]) AS t` and returns a row-count-only batch (`:86-107`).
-- Column decoding is a macro `build_array!` (`:137-153`) dispatched over Arrow `DataType` (`:155-218`) covering Int16/32/64, Float32/64, Boolean, Utf8, Binary, `Timestamp(ns, None)`, and Date32; any other type yields `IglooError::UnsupportedArrowType` (`:213-217`). The requested Rust type is driven by the Arrow field type, so the hardcoded schema must match the live column types.
-- Results are materialized into a single in-memory batch served by `MemoryExec` (`:222-230`).
-Collaboration: constructed by `datafusion_engine`; feeds Arrow batches into DataFusion joins; errors are boxed as `DataFusionError::External(IglooError::Postgres(..))` (`:96`, `:127-129`).
-Tests: only `quote_ident` behavior (`:238-246`); `try_new` and `scan` are untested (require live Postgres).
+- `try_new` connects with **`NoTls`** (`:256`) and spawns the connection driver task in the background for the client's lifetime (`:260-264`); the `Client` is held in an `Arc` (`:267`).
+- **Conservative filter pushdown**: `supports_filters_pushdown` (`:298-312`) reports `Inexact` for every filter that `try_expr_to_sql` (`:164`) can translate into an *exactly* semantics-preserving PostgreSQL snippet, `Unsupported` otherwise; `scan` translates with the same single source of truth (`:331-334`) and emits the clauses as `WHERE ... AND ...`. Whitelist: column-vs-literal comparisons on integers/booleans (all six operators), string `=`/`<>` only (ordering comparisons are collation-sensitive and never pushed; equality assumes deterministic collations), `IS [NOT] NULL` on schema columns, and `AND`/`OR`/`NOT` when every child translates. Floats, decimals, dates, timestamps, NULL literals, casts, LIKE, and column-vs-column are rejected. `Inexact` means DataFusion re-applies each pushed predicate above the scan, so a translation bug cannot silently corrupt results.
+- `scan` honors projection (`:321-324`) and a pushed-down `LIMIT` appended with no `ORDER BY` (`build_scan_sql`, `:214`).
+- Empty projection (e.g. `SELECT COUNT(*)`) produces `SELECT COUNT(*) FROM (SELECT 1 FROM <t>[WHERE ...][LIMIT n]) AS t` and returns a row-count-only batch (`:218-224`, `:345-361`).
+- Column decoding is a macro `build_array!` (`:376`) dispatched over Arrow `DataType` (`:394-457`) covering Int16/32/64, Float32/64, Boolean, Utf8, Binary, `Timestamp(ns, None)`, and Date32; any other type yields `IglooError::UnsupportedArrowType` (`:454`). The requested Rust type is driven by the Arrow field type, so the hardcoded schema must match the live column types.
+- Results are materialized into a single in-memory batch served by `MemoryExec` (`:465-469`).
+Collaboration: constructed by `datafusion_engine`; feeds Arrow batches into DataFusion joins; errors are boxed as `DataFusionError::External(IglooError::Postgres(..))`.
+Tests: 23 unit tests (`:474` onward) covering `quote_ident`, `build_scan_sql` (incl. WHERE/LIMIT/COUNT paths), and the translation whitelist (accepted shapes and seven rejection cases), plus 4 integration tests (`:784` onward) gated on `IGLOO_TEST_POSTGRES_URI` that assert live results through a DataFusion `SessionContext`; `try_new`'s failure paths remain untested.
 
 ### `src/adbc_postgres.rs` — standalone ADBC FFI path
 Responsibility: a separate, self-contained demonstration of querying Postgres through the ADBC C driver via FFI. It is NOT wired into DataFusion.
@@ -71,16 +75,16 @@ Public API: `async fn adbc_postgres_query_example(uri, sql) -> Result<()>` (`:15
 Key decisions:
 - Dynamically loads `adbc_driver_postgresql` at runtime with `AdbcVersion::V110` (`:22-23`); the shared library must be discoverable via the OS loader path (see comment `:20`). Passes the URI via `OptionDatabase::Uri` (`:25`).
 - Executes the SQL, collects batches, and pretty-prints them; a collection error is mapped to `IglooError::Arrow` (`:54-57`).
-- `print_arrow_batch` matches a subset of Arrow types (`:89-157`); notably **no Int64/Float32/Int16 arms**, so those fall through to the `other` branch printing `[unsupported: ..]` (`:153-156`).
+- `print_arrow_batch` matches the common Arrow types, including Int16/Int64/Float32 arms (`:90`, `:106`, `:114`) alongside Int32/Float64/Utf8/Boolean/Date32/Binary/Timestamp(ns); exotic types still fall through to a catch-all printing `[unsupported: ..]`.
 Collaboration: called once from `main` with `"SELECT 1 AS test_col"` (`src/main.rs:50-51`); shares only the `IglooError` type with the rest of the app. It does not use `PostgresTable` and opens its own connection.
-Tests: none.
+Tests: 4 unit tests of `print_arrow_batch` (supported types incl. nulls, zero-row batch, Int64, Int16+Float32); `adbc_postgres_query_example` itself is untested (requires driver + DB).
 
 ### `src/cache_layer.rs` — in-memory result cache
 Responsibility: store query→result strings.
-Public API: `struct Cache` (`:7-10`); `new` (`:13`), `get(&str) -> Option<&String>` (`:18`), `set(&str,&str)` (`:22`), `clear` (`:28`), `len` (`:34`), `is_empty` (`:38`).
-Key decisions: a `HashMap<String,String>` keyed by the **exact raw query string** (`:9`); no normalization, hashing, TTL, or size bound. `clear` logs the eviction count (`:29-31`).
+Public API: `struct Cache` (`:8-11`); `new`, `get(&str) -> Option<&String>` (`:48`), `set(&str,&str)` (`:52`), `clear`, `len`, `is_empty`.
+Key decisions: a `HashMap<String,String>` keyed by a **canonicalized query string** produced by the private `cache_key` (`:31`): the query is parsed with sqlparser's `PostgreSqlDialect` (re-exported by DataFusion, no extra dependency) and the AST's `Display` form becomes the key, so whitespace, keyword casing, and trailing-semicolon variants share one entry; unparseable input falls back to the trimmed raw string. Unquoted identifier case is deliberately NOT folded — the failure mode is a spurious miss, never a wrong hit. Still no TTL or size bound. `clear` logs the eviction count.
 Collaboration: `main` reads/writes it; `CdcListener::sync` clears it.
-Tests: four unit tests covering get-miss, set/get round-trip, overwrite, and clear (`:47-77`).
+Tests: seven unit tests covering get-miss, set/get round-trip, overwrite, clear, formatting-equivalence hits, distinct literals, and the non-SQL fallback (`:77-141`).
 
 ### `src/cdc_sync.rs` — file-based CDC listener
 Responsibility: detect change events and conservatively invalidate the cache.
@@ -108,7 +112,7 @@ Runtime sequence of `main()` (`src/main.rs:16-60`):
 5. `DataFusionEngine::new` (`:33`): create `SessionContext`, register `iceberg` (ListingTable over Parquet, hardcoded schema) and `pg_table` (this eagerly connects to Postgres via `tokio_postgres::connect` and spawns the connection task) (`src/datafusion_engine.rs:20-26`, `src/postgres_table.rs:37-53`). If Postgres is unreachable, startup fails here.
 6. Define the hardcoded demo query (`:36`).
 7. `cache.get(query)` (`:38`) — always a miss on first run (empty cache).
-8. On miss: `engine.query(query)` plans and executes the SQL — DataFusion scans the Parquet `ListingTable` and the `PostgresTable` (which issues `SELECT "user_id","extra_info" FROM "my_pg_table"`), joins them in memory, then `pretty_format_batches` renders the result and `cache.set` stores it keyed by the exact query string (`:43-45`). Because no `.parquet` files ship in `dummy_iceberg_cdc/`, the `iceberg` side is empty and the join yields zero rows even against a live Postgres.
+8. On miss: `engine.query(query)` plans and executes the SQL — DataFusion scans the Parquet `ListingTable` and the `PostgresTable` (which issues `SELECT "user_id","extra_info" FROM "my_pg_table"`, plus pushed `WHERE` clauses whenever DataFusion hands the scan translatable predicates), joins them in memory, then `pretty_format_batches` renders the result and `cache.set` stores it keyed by the canonicalized query text (`:43-45`). Because no `.parquet` files ship in `dummy_iceberg_cdc/`, the `iceberg` side is empty and the join yields zero rows even against a live Postgres.
 9. ADBC test: `adbc_postgres_query_example(conn_str, "SELECT 1 AS test_col")` loads the ADBC driver, opens its own connection, executes, and prints batches (`:50-51`). Failure here (missing driver `.so` or DB down) aborts `main` before step 10.
 10. `cdc.sync(&mut cache)` scans the CDC directory; finding `event1.json` it clears the entire cache (`:55`).
 11. Return `Ok(())`; the process exits and the spawned Postgres connection task is dropped.
@@ -135,7 +139,7 @@ sequenceDiagram
     Main->>Engine: query(SELECT ... JOIN ... WHERE user_id=42)
     Engine->>Listing: scan Parquet (0 rows; no files ship)
     Engine->>PG: scan()
-    PG->>Postgres: SELECT "user_id","extra_info" FROM "my_pg_table"
+    PG->>Postgres: SELECT "user_id","extra_info" FROM "my_pg_table" (+ pushed WHERE when translatable)
     Postgres-->>PG: rows -> Arrow RecordBatch
     Engine->>Engine: hash join in memory
     Engine-->>Main: Vec<RecordBatch>
@@ -159,12 +163,13 @@ Env vars actually read by code:
 | `IGLOO_PARQUET_PATH` | `./dummy_iceberg_cdc/` | `src/main.rs:28` |
 | `DATABASE_URL` | (falls through to `IGLOO_POSTGRES_URI`) | `src/main.rs:29` |
 | `IGLOO_POSTGRES_URI` | `postgres://postgres:postgres@localhost:5432/mydb` | `src/main.rs:30-31` |
+| `IGLOO_TEST_POSTGRES_URI` | none — integration tests print a skip note and return when unset | `src/postgres_table.rs:793` (test-only; seed data via `scripts/seed_test_db.sql`) |
 
 Documented but never read in code (flagged discrepancies):
 
 | Variable | Documented at | Status |
 | --- | --- | --- |
-| `TEST_ADBC_POSTGRESQL_URI` | `README.md:191-197` | Never referenced anywhere in `src/` (verified by grep); dead documentation — no integration tests read it. |
+| `TEST_ADBC_POSTGRESQL_URI` | formerly in README | Was never referenced anywhere in `src/`; removed from the README in this branch in favor of `IGLOO_TEST_POSTGRES_URI` (which IS read, see above). |
 | `LD_LIBRARY_PATH` | `README.md:180-187` | Not read via `env::var`; consumed by the OS dynamic linker when the ADBC driver is loaded (`src/adbc_postgres.rs:22`, comment `:20`). Real, but an OS-level variable, not app config. |
 | `CARGO_TERM_COLOR` | `.github/workflows/rust.yml:10` | CI-only; not application configuration. |
 
@@ -191,37 +196,37 @@ A structural wrinkle: inside `PostgresTable::scan` the function signature is Dat
 
 | Module | Tests present | Coverage |
 | --- | --- | --- |
-| `cache_layer.rs` | 4 (`:47-77`) | get-miss, set/get, overwrite semantics + `len`, `clear` + `is_empty`. Good coverage of the public surface. |
+| `cache_layer.rs` | 7 | get-miss, set/get, overwrite + `len`, `clear` + `is_empty`, formatting-equivalent keys hit one entry, distinct literals stay distinct, non-SQL trim fallback. |
 | `cdc_sync.rs` | 4 (`:93-153`) | events-present invalidation, no-events retention, missing/remote dir, non-JSON ignored. Good coverage of `sync`/`read_local_events`. |
-| `datafusion_engine.rs` | 1 (`:105-133`) | Parquet `iceberg` registration + query with filter/projection. |
-| `postgres_table.rs` | 2 (`:238-246`) | `quote_ident` only. |
-| `adbc_postgres.rs` | 0 | none. |
+| `datafusion_engine.rs` | 3 | Parquet `iceberg` registration + query with filter/projection, empty-parquet-directory (the shipped demo condition) yields zero rows, second-row projection. |
+| `postgres_table.rs` | 23 unit + 4 integration | `quote_ident`; `build_scan_sql` incl. WHERE/LIMIT/COUNT paths and quoting; the translation whitelist (all accepted operators, literal-on-left, escaping, IS NULL, AND/OR/NOT nesting) and seven rejection cases; integration (gated on `IGLOO_TEST_POSTGRES_URI`, seeded via `scripts/seed_test_db.sql`): pushed `=`, pushed `IS NULL`, unsupported text-ordering re-filtered above the scan, and filtered COUNT — all through a real DataFusion `SessionContext` against live PostgreSQL. |
+| `adbc_postgres.rs` | 4 | `print_arrow_batch`: supported types incl. nulls, zero-row batch, Int64, Int16+Float32. |
 | `errors.rs` | 0 | none (trivial). |
 | `main.rs` | 0 | none. |
 
 Concrete coverage gaps (untested public/observable paths):
-- `DataFusionEngine::new`, `register_postgres_table`, and `query` end-to-end (require Postgres); no test for the empty-parquet-directory case that the shipped demo actually hits.
-- `PostgresTable::try_new` and the entire `scan` path — projection ordering, `LIMIT` appending, empty-projection `COUNT(*)`, per-type `build_array!` decoding, and the `UnsupportedArrowType` branch — are all untested. None of the scan SQL-building logic is extracted into a pure function, so it cannot be tested without a live connection today.
-- `adbc_postgres::adbc_postgres_query_example` (requires driver + DB) and the pure `print_arrow_batch` (testable now, but untested) — including its missing Int64 arm.
+- `DataFusionEngine::new` / `register_postgres_table` end-to-end (the provider path is integration-tested from `postgres_table.rs`, but not through `DataFusionEngine` itself).
+- `PostgresTable::try_new` failure paths, and live decode coverage beyond BIGINT/TEXT (the seeded fixture exercises only those two types; Float/Date/Timestamp/Binary decoding in `build_array!` has no live test).
+- `adbc_postgres::adbc_postgres_query_example` (requires the ADBC driver shared library + DB).
 - `main` orchestration/ordering is untested.
 
 ## Known Limitations & Technical Debt
 
 | # | Item | Severity | Evidence |
 | --- | --- | --- | --- |
-| 1 | Cache keyed by exact raw query string — whitespace/case/semantic-equivalent variants miss; no normalization or fingerprinting despite README's "query fingerprints" claim | High | `src/cache_layer.rs:9`, `:18`, `:22-23`; claim at `README.md:202` |
+| 1 | ~~Cache keyed by exact raw query string~~ **Resolved in this branch**: keys are canonicalized via a sqlparser parse round-trip. Residual: unquoted identifier case is not folded (spurious miss only) and keys remain text-based, not plan-based | Low (residual) | `src/cache_layer.rs:31` |
 | 2 | Any CDC event clears the entire cache — no per-table/per-key invalidation | Med | `src/cdc_sync.rs:42-52` |
 | 3 | Hardcoded Arrow schemas and physical table name; the requested Rust decode type is driven by the Arrow field, so any mismatch with live column types fails every scan | High | `src/datafusion_engine.rs:31-34`, `:53-58`; decode at `src/postgres_table.rs:141`, `:155-218` |
-| 4 | No filter pushdown in `PostgresTable::scan` — full table is fetched into memory, then DataFusion filters on top | High | `src/postgres_table.rs:74`; `supports_filters_pushdown` not implemented (absent) |
-| 5 | Postgres connection uses `NoTls` — credentials and data travel in cleartext | Med | `src/postgres_table.rs:17`, `:38` |
-| 6 | `LIMIT` is appended with no `ORDER BY`; a pushed-down limit returns an arbitrary, nondeterministic row set (e.g. `SELECT * FROM pg_table LIMIT 5`) | Med | `src/postgres_table.rs:82`, `:118-123` |
+| 4 | ~~No filter pushdown in `PostgresTable::scan`~~ **Resolved in this branch** (conservatively): translatable predicates are pushed as WHERE clauses and re-applied above the scan (`Inexact`). Residual: only whitelisted shapes push down — no floats/decimals/dates/timestamps, no string ordering, no LIKE/IN/casts — so queries outside the whitelist still fetch the full table | Low (residual) | `src/postgres_table.rs:164`, `:298-312`, `:331-334` |
+| 5 | Postgres connection uses `NoTls` — credentials and data travel in cleartext | Med | `src/postgres_table.rs:18`, `:256` |
+| 6 | `LIMIT` is appended with no `ORDER BY`; a pushed-down limit returns an arbitrary, nondeterministic row set (e.g. `SELECT * FROM pg_table LIMIT 5`) | Med | `src/postgres_table.rs:214` |
 | 7 | Two independent Postgres access paths (DataFusion via `tokio-postgres` vs ADBC FFI) with different drivers, auth handling, and type mapping; the ADBC path only runs `SELECT 1` and is unused by queries | Med | `src/postgres_table.rs:37-53` vs `src/adbc_postgres.rs:15-34`; both invoked from `src/main.rs:33`, `:50-51` |
 | 8 | Single hardcoded demo query; no query API, argument, or loop | Med | `src/main.rs:36` |
 | 9 | CDC directory ships no `.parquet` files, so the `iceberg` scan returns zero rows and the demo join is always empty | Med | `dummy_iceberg_cdc/` holds only `event1.json`; schema at `src/datafusion_engine.rs:31-34` |
 | 10 | ADBC test query sits on the critical path (after `cache.set`, before `cdc.sync`); a missing driver `.so` or DB outage aborts the whole run so CDC sync never executes | Med | `src/adbc_postgres.rs:22-23`; ordering at `src/main.rs:51`, `:55` |
 | 11 | "Iceberg" is a plain Parquet `ListingTable` — no Iceberg manifests, snapshots, or materialized views exist | Med | `src/datafusion_engine.rs:29-49`; claims at `README.md:9-10`, `:41` |
 | 12 | Cache is unbounded — no TTL, size cap, or eviction beyond the wholesale CDC clear | Low | `src/cache_layer.rs:7-10` |
-| 13 | `print_arrow_batch` lacks Int64/Float32/Int16 arms; such columns print `[unsupported: ..]` | Low | `src/adbc_postgres.rs:89-157`, `:153-156` |
+| 13 | ~~`print_arrow_batch` lacks Int64/Float32/Int16 arms~~ **Resolved in this branch**. Residual: exotic Arrow types (e.g. decimals, nested) still print `[unsupported: ..]` via the catch-all | Low (residual) | `src/adbc_postgres.rs:90`, `:106`, `:114` |
 | 14 | CDC event bodies are read as opaque strings and only logged; content (table, keys, op) is never parsed | Low | `src/cdc_sync.rs:57-77` |
 | 15 | No metrics/instrumentation — only `log`; no counters or timings for cache hit rate, scan latency, etc. | Low | dependencies in `Cargo.toml:11-24` (no metrics crate); roadmap `README.md:212` |
 | 16 | `TEST_ADBC_POSTGRESQL_URI` documented but never read; `LD_LIBRARY_PATH` documented as config but is an OS-loader variable | Low | `README.md:180-197`; not present in `src/` |
@@ -235,8 +240,8 @@ README roadmap (`README.md:209-213`):
 | --- | --- | --- |
 | Async CDC updates & live cache refresh | Not started | `CdcListener::sync` is synchronous blocking `std::fs` I/O and only invalidates, never refreshes (`src/cdc_sync.rs:27-55`). |
 | REST or gRPC query API | Not started | `main` runs one hardcoded query and exits; no server, router, or transport dependency (`src/main.rs:36`, `Cargo.toml:11-24`). |
-| Query planner-aware caching | Not started | Cache keys are exact query strings, independent of the plan (`src/cache_layer.rs:9`, `:18`). |
+| Query planner-aware caching | Partial step | Cache keys are now canonicalized SQL text via a parse round-trip (`src/cache_layer.rs:31`) — still text-based, not derived from the logical/physical plan. |
 | Metrics (Prometheus, OpenTelemetry) | Not started | Only the `log` crate is present; no metrics/telemetry dependency (`Cargo.toml:11-24`). |
 | Optional persistent cache backend (RocksDB, Redis) | Not started | Cache is a concrete in-memory `HashMap` with no backend trait (`src/cache_layer.rs:7-10`). |
 
-Separately, the "Features" section (`README.md:200-205`) claims some capabilities as done: "Fast SQL Execution with DataFusion" (done — `src/datafusion_engine.rs:63-72`) and "Join Support for Postgres + Arrow datasets" (partial — DataFusion joins the two tables in memory, but with no filter pushdown and hardcoded schemas). "Smart Result Caching using query fingerprints" and "CDC-Driven Invalidation from Iceberg logs" overstate the exact-string cache and file-based CDC respectively.
+Separately, the README "Features" section now matches the code: "Fast SQL Execution with DataFusion" (done — `src/datafusion_engine.rs:63-72`), "Join Support for Postgres + Arrow datasets" (done in-memory, with conservative filter pushdown; schemas still hardcoded — see item 3), caching keyed by canonicalized SQL (done — `src/cache_layer.rs:31`), and CDC-driven invalidation from JSON event files (done, with Iceberg explicitly marked as planned).
