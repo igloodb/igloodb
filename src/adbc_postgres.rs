@@ -165,3 +165,56 @@ fn print_arrow_batch(batch: &RecordBatch) -> Result<()> {
     println!("--- End Batch ---");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::print_arrow_batch;
+    use arrow::array::{BooleanArray, Int32Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    #[test]
+    fn print_arrow_batch_supported_types_ok() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("flag", DataType::Boolean, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![Some(1), None])),
+                Arc::new(StringArray::from(vec![Some("hello"), None])),
+                Arc::new(BooleanArray::from(vec![None, Some(false)])),
+            ],
+        )
+        .unwrap();
+
+        assert!(print_arrow_batch(&batch).is_ok());
+    }
+
+    #[test]
+    fn print_arrow_batch_empty_batch_ok() {
+        // A schema with a column, but the column's array has zero rows. This
+        // exercises the `num_rows() == 0` early return in `print_arrow_batch`.
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(Vec::<i32>::new()))])
+                .unwrap();
+
+        assert!(print_arrow_batch(&batch).is_ok());
+    }
+
+    #[test]
+    fn print_arrow_batch_int64_ok() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
+
+        // Today an Int64 column falls through to the catch-all arm in
+        // `print_arrow_batch`; a later task may add explicit handling. Only
+        // assert success here so this test stays valid either way.
+        assert!(print_arrow_batch(&batch).is_ok());
+    }
+}

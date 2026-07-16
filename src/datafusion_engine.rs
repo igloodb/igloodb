@@ -131,4 +131,59 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[tokio::test]
+    async fn iceberg_scan_empty_dir_returns_zero_rows() {
+        // Mirrors the shipped demo condition where dummy_iceberg_cdc/ contains
+        // no .parquet files: DataFusion returns zero rows rather than erroring.
+        let dir = std::env::temp_dir().join(format!("igloo_df_test_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ctx = SessionContext::new();
+        DataFusionEngine::register_iceberg_table(&ctx, dir.to_str().unwrap()).unwrap();
+
+        let batches = ctx
+            .sql("SELECT * FROM iceberg")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn iceberg_projection_selects_second_row() {
+        let dir = std::env::temp_dir().join(format!("igloo_df_test_proj_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_test_parquet(&dir);
+
+        let ctx = SessionContext::new();
+        DataFusionEngine::register_iceberg_table(&ctx, dir.to_str().unwrap()).unwrap();
+
+        let batches = ctx
+            .sql("SELECT data FROM iceberg WHERE user_id = 7")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 1);
+        let col = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(col.value(0), "world");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
