@@ -225,6 +225,7 @@ Concrete coverage gaps (untested public/observable paths):
 | 14 | CDC event bodies are read as opaque strings and only logged; content (table, keys, op) is never parsed | Low | `src/cdc_sync.rs:57-77` |
 | 15 | No metrics/instrumentation — only `log`; no counters or timings for cache hit rate, scan latency, etc. | Low | dependencies in `Cargo.toml:11-24` (no metrics crate); roadmap `README.md:212` |
 | 16 | `TEST_ADBC_POSTGRESQL_URI` documented but never read; `LD_LIBRARY_PATH` documented as config but is an OS-loader variable | Low | `README.md:180-197`; not present in `src/` |
+| 17 | Declared MSRV `rust-version = "1.80.1"` is not satisfiable with the committed lockfile: the locked transitive dependency `ar_archive_writer 0.5.2` requires the `edition2024` Cargo feature (Cargo ≥ 1.85), so `cargo +1.80.1 check --all-targets --locked` fails while parsing the dependency graph. Either the MSRV must be raised or the offending dependencies pinned lower. | Med | `Cargo.toml:5`; `Cargo.lock` (`ar_archive_writer 0.5.2`); verified empirically with a local 1.80.1 toolchain |
 
 ## Roadmap Alignment
 
