@@ -114,14 +114,17 @@ psql -h 127.0.0.1 -p 5442 -c "SELECT * FROM iceberg LIMIT 10"
 ## 🏗️ Example Code
 
 ```rust
-use cache_layer::Cache;
-use cdc_sync::CdcListener;
+use std::time::Duration;
+
 use datafusion::arrow::util::pretty::pretty_format_batches;
-use datafusion_engine::DataFusionEngine;
+use igloo::cache_layer::Cache;
+use igloo::cdc_sync::CdcListener;
+use igloo::datafusion_engine::DataFusionEngine;
 
 #[tokio::main]
-async fn main() -> errors::Result<()> {
-    let mut cache = Cache::new();
+async fn main() -> igloo::errors::Result<()> {
+    // Arrow-native cache: bounded (LRU) with a TTL, safe to share as Arc<Cache>.
+    let cache = Cache::new(1024, Duration::from_secs(300));
     let cdc = CdcListener::new("./dummy_iceberg_cdc");
 
     let engine = DataFusionEngine::new(
@@ -135,18 +138,20 @@ async fn main() -> errors::Result<()> {
                  JOIN pg_table p ON i.user_id = p.user_id \
                  WHERE i.user_id = 42";
 
-    if let Some(result) = cache.get(query) {
-        println!("Cache hit:\n{}", result);
+    if let Some(batches) = cache.get(query) {
+        println!("Cache hit:\n{}", pretty_format_batches(&batches)?);
     } else {
         let batches = engine.query(query).await?;
-        let result = pretty_format_batches(&batches)?.to_string();
-        cache.set(query, &result);
-        println!("Cache miss. Executed with DataFusion:\n{}", result);
+        println!(
+            "Cache miss. Executed with DataFusion:\n{}",
+            pretty_format_batches(&batches)?
+        );
+        cache.set(query, batches);
     }
 
     // Invalidates cached results when CDC events are found.
     // (In production, CDC sync should run asynchronously.)
-    cdc.sync(&mut cache);
+    cdc.sync(&cache);
     Ok(())
 }
 ```
