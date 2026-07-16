@@ -99,6 +99,18 @@ Running Igloo locally requires you to manage dependencies and environment setup 
         ```
     This will compile and run the Igloo application.
 
+### Running the SQL server (`igloo serve`)
+
+Igloo can run as a long-lived server speaking the **PostgreSQL wire protocol**, so `psql`, BI tools, and any Postgres driver can query it directly:
+
+```sh
+IGLOO_LISTEN_ADDR=127.0.0.1:5442 cargo run -- serve
+# in another shell:
+psql -h 127.0.0.1 -p 5442 -c "SELECT * FROM iceberg LIMIT 10"
+```
+
+`listen_addr`/`IGLOO_LISTEN_ADDR` is required in serve mode (fail-fast). The registered tables (`iceberg`, `pg_table`) are queryable with arbitrary SQL, including joins and aggregates. **The endpoint is currently unauthenticated plaintext** (see roadmap F4.2 for auth/TLS) — keep it on localhost or a trusted network.
+
 ## 🏗️ Example Code
 
 ```rust

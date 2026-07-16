@@ -10,3 +10,4 @@ pub mod config;
 pub mod datafusion_engine;
 pub mod errors;
 pub mod postgres_table;
+pub mod server;

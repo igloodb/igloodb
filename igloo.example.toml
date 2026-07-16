@@ -21,3 +21,9 @@ cdc_path = "./dummy_iceberg_cdc"
 # Prefer setting this via DATABASE_URL / IGLOO_POSTGRES_URI instead of
 # committing credentials to a file.
 postgres_uri = "postgres://postgres:postgres@localhost:5432/mydb"
+
+# Address for the pgwire server started by `igloo serve` (env override:
+# IGLOO_LISTEN_ADDR). Optional — only required in serve mode. The endpoint
+# is currently UNAUTHENTICATED plaintext; keep it on localhost or a
+# trusted network.
+# listen_addr = "127.0.0.1:5442"

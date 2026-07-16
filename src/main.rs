@@ -6,7 +6,8 @@ use igloo::cdc_sync::CdcListener;
 use igloo::config::Config;
 use igloo::datafusion_engine::DataFusionEngine;
 use igloo::errors::Result;
-use igloo::{adbc_postgres, config};
+use igloo::{adbc_postgres, config, server};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,6 +15,12 @@ async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let config = load_config_or_exit();
+
+    // `igloo serve` runs the long-lived pgwire server; plain `igloo` runs
+    // the single-query demo below.
+    if std::env::args().nth(1).as_deref() == Some("serve") {
+        return serve(config).await;
+    }
 
     log::info!("Initializing Igloo components...");
     let mut cache = Cache::new();
@@ -47,6 +54,22 @@ async fn main() -> Result<()> {
 
     log::info!("Igloo application finished successfully.");
     Ok(())
+}
+
+/// Runs the pgwire server until killed.
+async fn serve(config: config::Config) -> Result<()> {
+    let listen_addr = match config.require_listen_addr() {
+        Ok(addr) => addr.to_string(),
+        Err(e) => {
+            eprintln!("{}", e);
+            eprintln!("See igloo.example.toml for all options.");
+            std::process::exit(2);
+        }
+    };
+    log::info!("Initializing DataFusionEngine for serve mode...");
+    let engine =
+        Arc::new(DataFusionEngine::new(&config.parquet_path, config.postgres_uri.expose()).await?);
+    server::serve(engine, &listen_addr).await
 }
 
 /// Loads configuration, exiting with a clear message on failure so a

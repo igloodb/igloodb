@@ -51,6 +51,7 @@ struct FileConfig {
     parquet_path: Option<String>,
     cdc_path: Option<String>,
     postgres_uri: Option<String>,
+    listen_addr: Option<String>,
 }
 
 /// Fully-resolved application configuration.
@@ -62,6 +63,9 @@ pub struct Config {
     pub cdc_path: String,
     /// PostgreSQL connection string (URI or key-value form).
     pub postgres_uri: Secret,
+    /// Address for the pgwire server (`igloo serve`). Optional because the
+    /// demo mode doesn't need it; serve mode fails fast when it is absent.
+    pub listen_addr: Option<String>,
 }
 
 impl Config {
@@ -105,11 +109,13 @@ impl Config {
             .or_else(|| env("IGLOO_POSTGRES_URI"))
             .or(file.postgres_uri)
             .ok_or_else(|| missing("postgres_uri", "IGLOO_POSTGRES_URI or DATABASE_URL"))?;
+        let listen_addr = env("IGLOO_LISTEN_ADDR").or(file.listen_addr);
 
         let config = Self {
             parquet_path,
             cdc_path,
             postgres_uri: Secret::new(postgres_uri),
+            listen_addr,
         };
         config.validate()?;
         Ok(config)
@@ -130,7 +136,26 @@ impl Config {
                 "postgres_uri must be a postgres:// URI or key-value connection string".into(),
             ));
         }
+        if let Some(addr) = &self.listen_addr {
+            addr.parse::<std::net::SocketAddr>().map_err(|e| {
+                IglooError::Config(format!(
+                    "listen_addr {:?} is not a valid socket address (host:port): {}",
+                    addr, e
+                ))
+            })?;
+        }
         Ok(())
+    }
+
+    /// The listen address, required in serve mode.
+    pub fn require_listen_addr(&self) -> Result<&str> {
+        self.listen_addr.as_deref().ok_or_else(|| {
+            IglooError::Config(
+                "missing required configuration for serve mode: listen_addr \
+                 (set IGLOO_LISTEN_ADDR, or listen_addr in igloo.toml)"
+                    .into(),
+            )
+        })
     }
 }
 
@@ -154,6 +179,7 @@ mod tests {
             parquet_path: Some("/data/parquet".into()),
             cdc_path: Some("/data/cdc".into()),
             postgres_uri: Some("postgres://u:p@db:5432/mydb".into()),
+            listen_addr: None,
         }
     }
 
@@ -208,6 +234,26 @@ mod tests {
         };
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
         assert!(err.contains("postgres_uri"), "got: {}", err);
+    }
+
+    #[test]
+    fn listen_addr_is_optional_but_validated() {
+        let absent = Config::from_sources(full_file(), no_env).unwrap();
+        assert!(absent.listen_addr.is_none());
+        let err = absent.require_listen_addr().unwrap_err().to_string();
+        assert!(err.contains("IGLOO_LISTEN_ADDR"), "got: {}", err);
+
+        let valid = Config::from_sources(full_file(), |key| {
+            (key == "IGLOO_LISTEN_ADDR").then(|| "127.0.0.1:5442".to_string())
+        })
+        .unwrap();
+        assert_eq!(valid.require_listen_addr().unwrap(), "127.0.0.1:5442");
+
+        let invalid = Config::from_sources(full_file(), |key| {
+            (key == "IGLOO_LISTEN_ADDR").then(|| "not-an-address".to_string())
+        });
+        let err = invalid.unwrap_err().to_string();
+        assert!(err.contains("listen_addr"), "got: {}", err);
     }
 
     #[test]

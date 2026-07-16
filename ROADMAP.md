@@ -79,6 +79,8 @@ Replace scattered `env::var(...).unwrap_or_else(localhost)` with a typed config 
 
 Implement a server daemon speaking the Postgres wire protocol (via `pgwire`), so `psql`, BI tools (Metabase, Grafana, Superset), and every Postgres driver in every language work with zero client-side changes. This is the highest-leverage single feature in the roadmap: it multiplies the audience from "people willing to edit `main.rs`" to "anyone with a SQL client".
 
+> **Status:** walking skeleton landed (`igloo serve`, `src/server.rs`): simple-query protocol over plaintext TCP, arbitrary SQL → DataFusion, per-query errors keep the connection alive, integration-tested with tokio-postgres as the client. Still open before the criteria below pass: extended query protocol/prepared statements, auth, the concurrent-load test, and the BI-tool walkthrough.
+
 **Acceptance criteria**
 - [ ] `igloo serve` starts a daemon that listens on a configured address and serves concurrent connections until stopped; clean shutdown on SIGTERM drains in-flight queries.
 - [ ] `psql -h <igloo> -c "SELECT ..."` executes arbitrary SQL against registered sources and returns correct results, including simple/extended query protocol, prepared statements with parameters, and error responses that don't kill the connection.
