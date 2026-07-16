@@ -18,6 +18,9 @@ pub enum IglooError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("Configuration error: {0}")]
+    Config(String),
+
     #[error("Unsupported Arrow type in PostgresTable: {0:?}")]
     UnsupportedArrowType(arrow::datatypes::DataType),
 }

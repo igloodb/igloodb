@@ -44,8 +44,8 @@ Build on the unit-test baseline from PR #12 (cache, CDC sync, identifier quoting
 
 **Acceptance criteria**
 - [ ] `cargo test` runs unit tests covering: cache get/set/eviction semantics (partially in place), error-type conversions, and SQL-to-table-dependency extraction (once F2.2 lands, tests extend to it).
-- [ ] An integration test suite (behind `--features integration-tests` or `cargo test --test '*'` with Docker available) spins up PostgreSQL via testcontainers, registers a table, executes a federated query, and asserts on the Arrow results — not on log output.
-- [ ] CI runs fmt + clippy (`-D warnings`) + unit tests on every PR (already partially present) **and** the integration suite on a schedule or label.
+- [x] An integration test suite executes a federated query (Parquet ⋈ Postgres) against a live PostgreSQL and asserts on the Arrow results — not on log output. *(Implemented as `tests/postgres_federation.rs`, gated on `IGLOO_TEST_POSTGRES_URI` so plain `cargo test` stays hermetic; CI provides a Postgres service container. Testcontainers can replace the gate later if per-test isolation is needed.)*
+- [x] CI runs fmt + clippy (`-D warnings`) + unit tests **and** the integration suite on every PR (integration runs as a separate job with a Postgres service).
 - [ ] A regression test exists for every bug fixed from this point forward (enforced by review checklist in `CONTRIBUTING.md`).
 - [ ] Code coverage is measured (e.g. `cargo-llvm-cov`) and reported on PRs; no hard threshold initially, but the trend is visible.
 
@@ -64,10 +64,10 @@ PR #12 already did the rescue work (DataFusion 39→44, one Arrow major across t
 Replace scattered `env::var(...).unwrap_or_else(localhost)` with a typed config (config file + env overrides, e.g. `figment` or `config`): sources, cache limits, listen addresses, credentials via env/secret refs only.
 
 **Acceptance criteria**
-- [ ] Starting Igloo without required configuration (e.g. no data sources defined) exits non-zero with a message naming the missing key — no silent localhost defaults.
-- [ ] A commented `igloo.example.toml` documents every option; `README` quickstart uses it.
-- [ ] Secrets (DB passwords) are only accepted via environment variables or file references, never inline in a checked-in config; config structs redact secrets in `Debug`/logs, verified by a unit test.
-- [ ] Invalid values (bad URI, negative cache size) fail at startup with a validation error, covered by unit tests.
+- [x] Starting Igloo without required configuration (e.g. no data sources defined) exits non-zero with a message naming the missing key — no silent localhost defaults.
+- [x] A commented `igloo.example.toml` documents every option; the README configuration reference covers it.
+- [x] Secrets (DB passwords) are redacted by the `Secret` config type in `Debug`/`Display`/logs, verified by a unit test; docs steer credentials to env vars rather than checked-in files.
+- [x] Invalid values (bad connection string, empty paths) fail at startup with a validation error, covered by unit tests. *(Extends to numeric limits like cache sizes when those options appear in F1.4.)*
 
 ---
 

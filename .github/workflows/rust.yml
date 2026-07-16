@@ -38,3 +38,28 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: igloo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+    - uses: actions/checkout@v4
+    - name: Cache cargo registry and build artifacts
+      uses: Swatinem/rust-cache@v2
+    - name: Run integration tests
+      run: cargo test --test postgres_federation -- --nocapture
+      env:
+        IGLOO_TEST_POSTGRES_URI: postgres://postgres:postgres@localhost:5432/igloo_test
