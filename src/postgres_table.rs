@@ -3,7 +3,7 @@ use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
     Int16Builder, Int32Builder, Int64Builder, StringBuilder, TimestampNanosecondBuilder,
 };
-use arrow::datatypes::{DataType, Date32Type, SchemaRef, TimeUnit};
+use arrow::datatypes::{DataType, Date32Type, Fields, SchemaRef, TimeUnit};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use async_trait::async_trait;
 use datafusion::catalog::Session;
@@ -21,6 +21,43 @@ use crate::errors::{IglooError, Result as IglooResult};
 /// Quote a SQL identifier for PostgreSQL, escaping embedded double quotes.
 fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Build the SQL that [`PostgresTable::scan`] runs against PostgreSQL for a
+/// given projection.
+///
+/// When `projected_fields` is empty (e.g. `SELECT COUNT(*)`), this produces a
+/// row-count query; otherwise it selects the projected columns explicitly, in
+/// projected-schema order, so result column positions line up with the Arrow
+/// schema. This is pure string construction with no client/session
+/// dependency, kept as the single source of truth for the scan SQL.
+fn build_scan_sql(table_name: &str, projected_fields: &Fields, limit: Option<usize>) -> String {
+    let limit_clause = limit.map(|n| format!(" LIMIT {}", n)).unwrap_or_default();
+
+    // A projection can be empty (e.g. `SELECT COUNT(*)`), in which case
+    // DataFusion only needs the row count, not any column data.
+    if projected_fields.is_empty() {
+        format!(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM {}{}) AS t",
+            quote_ident(table_name),
+            limit_clause
+        )
+    } else {
+        // Select the projected columns explicitly, in projected-schema order,
+        // so result column positions line up with the Arrow schema.
+        let sql_select_cols = projected_fields
+            .iter()
+            .map(|f| quote_ident(f.name()))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            "SELECT {} FROM {}{}",
+            sql_select_cols,
+            quote_ident(table_name),
+            limit_clause
+        )
+    }
 }
 
 // Represents a table physically stored in PostgreSQL
@@ -79,19 +116,14 @@ impl TableProvider for PostgresTable {
             None => self.schema.clone(),
         };
 
-        let limit_clause = limit.map(|n| format!(" LIMIT {}", n)).unwrap_or_default();
+        let query = build_scan_sql(&self.table_name, projected_schema.fields(), limit);
 
         // A projection can be empty (e.g. `SELECT COUNT(*)`), in which case
         // DataFusion only needs the row count, not any column data.
         if projected_schema.fields().is_empty() {
-            let count_query = format!(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM {}{}) AS t",
-                quote_ident(&self.table_name),
-                limit_clause
-            );
             let row = self
                 .client
-                .query_one(&count_query, &[])
+                .query_one(&query, &[])
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(IglooError::Postgres(e))))?;
             let row_count: i64 = row.get(0);
@@ -106,21 +138,6 @@ impl TableProvider for PostgresTable {
             )?));
         }
 
-        // Select the projected columns explicitly, in projected-schema order,
-        // so result column positions line up with the Arrow schema.
-        let sql_select_cols = projected_schema
-            .fields()
-            .iter()
-            .map(|f| quote_ident(f.name()))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let query = format!(
-            "SELECT {} FROM {}{}",
-            sql_select_cols,
-            quote_ident(&self.table_name),
-            limit_clause
-        );
         log::debug!("Executing scan query on Postgres: {}", query);
 
         let rows =
@@ -233,7 +250,17 @@ impl TableProvider for PostgresTable {
 
 #[cfg(test)]
 mod tests {
-    use super::quote_ident;
+    use super::{build_scan_sql, quote_ident};
+    use arrow::datatypes::{DataType, Field, Fields};
+
+    /// Build an Arrow `Fields` from column names. The concrete data type is
+    /// irrelevant to `build_scan_sql`, which only reads field names.
+    fn fields_from(names: &[&str]) -> Fields {
+        names
+            .iter()
+            .map(|n| Field::new(*n, DataType::Int64, true))
+            .collect()
+    }
 
     #[test]
     fn quote_ident_wraps_in_double_quotes() {
@@ -243,5 +270,57 @@ mod tests {
     #[test]
     fn quote_ident_escapes_embedded_quotes() {
         assert_eq!(quote_ident("evil\"name"), "\"evil\"\"name\"");
+    }
+
+    #[test]
+    fn build_scan_sql_projection_no_limit() {
+        let sql = build_scan_sql(
+            "my_pg_table",
+            &fields_from(&["user_id", "extra_info"]),
+            None,
+        );
+        assert_eq!(
+            sql,
+            "SELECT \"user_id\", \"extra_info\" FROM \"my_pg_table\""
+        );
+    }
+
+    #[test]
+    fn build_scan_sql_projection_with_limit() {
+        let sql = build_scan_sql(
+            "my_pg_table",
+            &fields_from(&["user_id", "extra_info"]),
+            Some(5),
+        );
+        assert_eq!(
+            sql,
+            "SELECT \"user_id\", \"extra_info\" FROM \"my_pg_table\" LIMIT 5"
+        );
+    }
+
+    #[test]
+    fn build_scan_sql_empty_projection_with_limit() {
+        let sql = build_scan_sql("my_pg_table", &fields_from(&[]), Some(5));
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) FROM (SELECT 1 FROM \"my_pg_table\" LIMIT 5) AS t"
+        );
+    }
+
+    #[test]
+    fn build_scan_sql_empty_projection_no_limit() {
+        let sql = build_scan_sql("my_pg_table", &fields_from(&[]), None);
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) FROM (SELECT 1 FROM \"my_pg_table\") AS t"
+        );
+    }
+
+    #[test]
+    fn build_scan_sql_escapes_embedded_quotes() {
+        // Both the table name and the column name contain a double quote, which
+        // `quote_ident` doubles when escaping.
+        let sql = build_scan_sql("we\"ird", &fields_from(&["c\"ol"]), None);
+        assert_eq!(sql, "SELECT \"c\"\"ol\" FROM \"we\"\"ird\"");
     }
 }

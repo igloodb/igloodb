@@ -3,8 +3,8 @@ use adbc_core::driver_manager::ManagedDriver;
 use adbc_core::options::{AdbcVersion, OptionDatabase};
 use adbc_core::{Connection, Database, Driver, Statement};
 use arrow::array::{
-    Array, BooleanArray, Date32Array, Float64Array, GenericBinaryArray, Int32Array, StringArray,
-    TimestampNanosecondArray,
+    Array, BooleanArray, Date32Array, Float32Array, Float64Array, GenericBinaryArray, Int16Array,
+    Int32Array, Int64Array, StringArray, TimestampNanosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -87,11 +87,35 @@ fn print_arrow_batch(batch: &RecordBatch) -> Result<()> {
                 print!("NULL");
             } else {
                 match data_type {
+                    DataType::Int16 => print!(
+                        "{}",
+                        array
+                            .as_any()
+                            .downcast_ref::<Int16Array>()
+                            .unwrap()
+                            .value(row_idx)
+                    ),
                     DataType::Int32 => print!(
                         "{}",
                         array
                             .as_any()
                             .downcast_ref::<Int32Array>()
+                            .unwrap()
+                            .value(row_idx)
+                    ),
+                    DataType::Int64 => print!(
+                        "{}",
+                        array
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap()
+                            .value(row_idx)
+                    ),
+                    DataType::Float32 => print!(
+                        "{}",
+                        array
+                            .as_any()
+                            .downcast_ref::<Float32Array>()
                             .unwrap()
                             .value(row_idx)
                     ),
@@ -164,4 +188,76 @@ fn print_arrow_batch(batch: &RecordBatch) -> Result<()> {
     }
     println!("--- End Batch ---");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::print_arrow_batch;
+    use arrow::array::{
+        BooleanArray, Float32Array, Int16Array, Int32Array, Int64Array, StringArray,
+    };
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    #[test]
+    fn print_arrow_batch_supported_types_ok() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("flag", DataType::Boolean, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![Some(1), None])),
+                Arc::new(StringArray::from(vec![Some("hello"), None])),
+                Arc::new(BooleanArray::from(vec![None, Some(false)])),
+            ],
+        )
+        .unwrap();
+
+        assert!(print_arrow_batch(&batch).is_ok());
+    }
+
+    #[test]
+    fn print_arrow_batch_empty_batch_ok() {
+        // A schema with a column, but the column's array has zero rows. This
+        // exercises the `num_rows() == 0` early return in `print_arrow_batch`.
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(Vec::<i32>::new()))])
+                .unwrap();
+
+        assert!(print_arrow_batch(&batch).is_ok());
+    }
+
+    #[test]
+    fn print_arrow_batch_int64_ok() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
+
+        // Asserts success only, not the rendered text, so the test does not
+        // depend on how Int64 values are formatted.
+        assert!(print_arrow_batch(&batch).is_ok());
+    }
+
+    #[test]
+    fn print_arrow_batch_int16_float32_ok() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("small", DataType::Int16, true),
+            Field::new("ratio", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int16Array::from(vec![Some(1i16), None])),
+                Arc::new(Float32Array::from(vec![Some(1.5f32), None])),
+            ],
+        )
+        .unwrap();
+
+        assert!(print_arrow_batch(&batch).is_ok());
+    }
 }

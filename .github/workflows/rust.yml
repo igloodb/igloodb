@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
 
@@ -16,12 +20,20 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
     - name: Cache cargo registry and build artifacts
       uses: Swatinem/rust-cache@v2
     - name: Check formatting
       run: cargo fmt --all -- --check
     - name: Run Clippy
       run: cargo clippy --all-targets --all-features -- -D warnings
+    - name: Check docs
+      run: cargo doc --no-deps
+      env:
+        RUSTDOCFLAGS: "-D warnings"
     - name: Build
       run: cargo build --verbose
     - name: Run tests
