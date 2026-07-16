@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     }
 
     log::info!("Initializing Igloo components...");
-    let mut cache = Cache::new();
+    let cache = Cache::new(config.cache_max_entries, config.cache_ttl);
     let cdc = CdcListener::new(&config.cdc_path);
 
     log::info!("Initializing DataFusionEngine...");
@@ -32,14 +32,17 @@ async fn main() -> Result<()> {
 
     let query = "SELECT i.user_id, i.data, p.extra_info FROM iceberg i JOIN pg_table p ON i.user_id = p.user_id WHERE i.user_id = 42";
 
-    if let Some(cached_result) = cache.get(query) {
+    if let Some(cached_batches) = cache.get(query) {
         log::info!(target: "igloo_main", "Cache hit for query: {}", query);
-        println!("Cached result:\n{}", cached_result);
+        println!(
+            "Cached result:\n{}",
+            pretty_format_batches(&cached_batches)?
+        );
     } else {
         log::info!(target: "igloo_main", "Cache miss for query: {}. Executing with DataFusion.", query);
         let record_batches = engine.query(query).await?;
         let result_str = pretty_format_batches(&record_batches)?.to_string();
-        cache.set(query, &result_str);
+        cache.set(query, record_batches);
         println!("Cache miss. Executed with DataFusion:\n{}", result_str);
     }
 
@@ -49,7 +52,7 @@ async fn main() -> Result<()> {
     log::info!(target: "igloo_main", "ADBC test query succeeded! sql: {}", sql_adbc_test);
 
     log::info!("Starting CDC sync...");
-    cdc.sync(&mut cache);
+    cdc.sync(&cache);
     log::info!("CDC sync completed.");
 
     log::info!("Igloo application finished successfully.");

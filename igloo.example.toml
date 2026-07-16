@@ -27,3 +27,8 @@ postgres_uri = "postgres://postgres:postgres@localhost:5432/mydb"
 # is currently UNAUTHENTICATED plaintext; keep it on localhost or a
 # trusted network.
 # listen_addr = "127.0.0.1:5442"
+
+# Query-result cache tuning (optional; defaults shown). Env overrides:
+# IGLOO_CACHE_MAX_ENTRIES / IGLOO_CACHE_TTL_SECONDS. Must be positive.
+# cache_max_entries = 1024
+# cache_ttl_seconds = 300

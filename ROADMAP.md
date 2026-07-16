@@ -111,8 +111,10 @@ Kill the hardcoded schemas. Sources are declared in config (and later via SQL `C
 
 Replace the string HashMap with a cache that stores **Arrow `RecordBatch`es** keyed by a **fingerprint of the normalized logical plan** (so `select * from t where id=42` and `SELECT *  FROM t WHERE id = 42` share an entry), with TTL, LRU eviction under a configurable memory budget, and thread-safe concurrent access (e.g. `moka`).
 
+> **Status:** intermediate step landed: the cache now stores Arrow `RecordBatch`es, is thread-safe (`Arc<Cache>`), enforces a configurable max-entries LRU bound and TTL (injectable clock, tested without sleeps), keys on quote-aware whitespace-normalized SQL, and exposes hit/miss/eviction counters via `stats()`. Still open for the criteria below: plan-fingerprint keying, a byte-budget (entries-count only today), metrics export, and `EXPLAIN` cache provenance.
+
 **Acceptance criteria**
-- [ ] Cache stores Arrow data; a cache hit returns batches byte-identical (schema + data) to a fresh execution, verified by an integration test.
+- [ ] Cache stores Arrow data; a cache hit returns batches byte-identical (schema + data) to a fresh execution, verified by an integration test. *(Storage is Arrow-native now; the integration-test assertion is still to be written.)*
 - [ ] Key is derived from the normalized/optimized logical plan: whitespace, case, and semantically-equivalent literal formatting differences hit the same entry (unit-tested with ≥ 10 equivalence pairs and ≥ 5 non-equivalence pairs).
 - [ ] Memory budget is enforced: filling the cache past `cache.max_bytes` evicts LRU entries and the process RSS stays bounded under a sustained-insert stress test.
 - [ ] Per-entry TTL and a global default TTL are configurable; an expired entry re-executes and repopulates.

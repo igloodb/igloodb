@@ -52,7 +52,14 @@ struct FileConfig {
     cdc_path: Option<String>,
     postgres_uri: Option<String>,
     listen_addr: Option<String>,
+    cache_max_entries: Option<u64>,
+    cache_ttl_seconds: Option<u64>,
 }
+
+/// Default cache capacity when not configured.
+const DEFAULT_CACHE_MAX_ENTRIES: u64 = 1024;
+/// Default cache entry TTL when not configured.
+const DEFAULT_CACHE_TTL_SECONDS: u64 = 300;
 
 /// Fully-resolved application configuration.
 #[derive(Debug)]
@@ -66,6 +73,10 @@ pub struct Config {
     /// Address for the pgwire server (`igloo serve`). Optional because the
     /// demo mode doesn't need it; serve mode fails fast when it is absent.
     pub listen_addr: Option<String>,
+    /// Maximum cached query results before LRU eviction (default 1024).
+    pub cache_max_entries: usize,
+    /// How long a cached result stays valid (default 300s).
+    pub cache_ttl: std::time::Duration,
 }
 
 impl Config {
@@ -110,12 +121,20 @@ impl Config {
             .or(file.postgres_uri)
             .ok_or_else(|| missing("postgres_uri", "IGLOO_POSTGRES_URI or DATABASE_URL"))?;
         let listen_addr = env("IGLOO_LISTEN_ADDR").or(file.listen_addr);
+        let cache_max_entries = env_u64(&env, "IGLOO_CACHE_MAX_ENTRIES")?
+            .or(file.cache_max_entries)
+            .unwrap_or(DEFAULT_CACHE_MAX_ENTRIES);
+        let cache_ttl_seconds = env_u64(&env, "IGLOO_CACHE_TTL_SECONDS")?
+            .or(file.cache_ttl_seconds)
+            .unwrap_or(DEFAULT_CACHE_TTL_SECONDS);
 
         let config = Self {
             parquet_path,
             cdc_path,
             postgres_uri: Secret::new(postgres_uri),
             listen_addr,
+            cache_max_entries: cache_max_entries as usize,
+            cache_ttl: std::time::Duration::from_secs(cache_ttl_seconds),
         };
         config.validate()?;
         Ok(config)
@@ -144,6 +163,16 @@ impl Config {
                 ))
             })?;
         }
+        if self.cache_max_entries == 0 {
+            return Err(IglooError::Config(
+                "cache_max_entries must be positive".into(),
+            ));
+        }
+        if self.cache_ttl.is_zero() {
+            return Err(IglooError::Config(
+                "cache_ttl_seconds must be positive".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -157,6 +186,21 @@ impl Config {
             )
         })
     }
+}
+
+/// Reads an optional non-negative integer from the environment, failing
+/// loudly on unparseable values instead of ignoring them.
+fn env_u64(env: &impl Fn(&str) -> Option<String>, key: &str) -> Result<Option<u64>> {
+    env(key)
+        .map(|raw| {
+            raw.parse::<u64>().map_err(|_| {
+                IglooError::Config(format!(
+                    "{} must be a non-negative integer, got {:?}",
+                    key, raw
+                ))
+            })
+        })
+        .transpose()
 }
 
 fn missing(key: &str, how: &str) -> IglooError {
@@ -180,6 +224,8 @@ mod tests {
             cdc_path: Some("/data/cdc".into()),
             postgres_uri: Some("postgres://u:p@db:5432/mydb".into()),
             listen_addr: None,
+            cache_max_entries: None,
+            cache_ttl_seconds: None,
         }
     }
 
@@ -254,6 +300,43 @@ mod tests {
         });
         let err = invalid.unwrap_err().to_string();
         assert!(err.contains("listen_addr"), "got: {}", err);
+    }
+
+    #[test]
+    fn cache_settings_default_and_override() {
+        let defaults = Config::from_sources(full_file(), no_env).unwrap();
+        assert_eq!(defaults.cache_max_entries, 1024);
+        assert_eq!(defaults.cache_ttl.as_secs(), 300);
+
+        let file = FileConfig {
+            cache_max_entries: Some(8),
+            cache_ttl_seconds: Some(30),
+            ..full_file()
+        };
+        let overridden = Config::from_sources(file, |key| {
+            (key == "IGLOO_CACHE_MAX_ENTRIES").then(|| "16".to_string())
+        })
+        .unwrap();
+        assert_eq!(overridden.cache_max_entries, 16, "env beats file");
+        assert_eq!(overridden.cache_ttl.as_secs(), 30, "file beats default");
+    }
+
+    #[test]
+    fn invalid_cache_settings_are_rejected() {
+        let zero_capacity = FileConfig {
+            cache_max_entries: Some(0),
+            ..full_file()
+        };
+        let err = Config::from_sources(zero_capacity, no_env)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cache_max_entries"), "got: {}", err);
+
+        let bad_env = Config::from_sources(full_file(), |key| {
+            (key == "IGLOO_CACHE_TTL_SECONDS").then(|| "soon".to_string())
+        });
+        let err = bad_env.unwrap_err().to_string();
+        assert!(err.contains("IGLOO_CACHE_TTL_SECONDS"), "got: {}", err);
     }
 
     #[test]
