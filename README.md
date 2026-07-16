@@ -213,6 +213,11 @@ Igloo relies on ADBC C++ drivers (such as the PostgreSQL driver) via Rust's Fore
 - 📦 Optional persistent cache backend (e.g., RocksDB, Redis)
 
 
+## 📚 Documentation
+
+- [Architecture deep-dive](docs/ARCHITECTURE.md) — module inventory, data flow, and tech-debt notes.
+- CI publishes rustdoc + these docs to GitHub Pages via the `Docs` workflow (an admin must set the repository's Pages Source to "GitHub Actions" once for this to work).
+
 ## 🤝 Contributing
 
 Contributions, suggestions, and PRs are welcome! See CONTRIBUTING.md for more details.

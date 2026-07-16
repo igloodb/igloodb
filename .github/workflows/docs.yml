@@ -1,0 +1,68 @@
+name: Docs
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Build rustdoc
+        run: cargo doc --no-deps
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp -r target/doc _site/api
+          pandoc docs/ARCHITECTURE.md --standalone --metadata title="Igloo Architecture" -o _site/architecture.html
+          cat > _site/index.html <<'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+          <meta charset="UTF-8">
+          <title>Igloo</title>
+          </head>
+          <body>
+          <header>
+          <h1>Igloo</h1>
+          <p>A distributed SQL query engine with an intelligent caching layer, built on DataFusion, Arrow and ADBC.</p>
+          </header>
+          <nav>
+          <ul>
+          <li><a href="architecture.html">Architecture</a></li>
+          <li><a href="api/igloo/index.html">API documentation (rustdoc)</a></li>
+          </ul>
+          </nav>
+          </body>
+          </html>
+          HTML
+          touch _site/.nojekyll
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
