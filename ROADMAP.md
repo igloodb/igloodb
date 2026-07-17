@@ -111,7 +111,7 @@ Kill the hardcoded schemas. Sources are declared in config (and later via SQL `C
 
 Replace the string HashMap with a cache that stores **Arrow `RecordBatch`es** keyed by a **fingerprint of the normalized logical plan** (so `select * from t where id=42` and `SELECT *  FROM t WHERE id = 42` share an entry), with TTL, LRU eviction under a configurable memory budget, and thread-safe concurrent access (e.g. `moka`).
 
-> **Status:** intermediate step landed: the cache now stores Arrow `RecordBatch`es, is thread-safe (`Arc<Cache>`), enforces a configurable max-entries LRU bound and TTL (injectable clock, tested without sleeps), keys on quote-aware whitespace-normalized SQL, and exposes hit/miss/eviction counters via `stats()`. Still open for the criteria below: plan-fingerprint keying, a byte-budget (entries-count only today), metrics export, and `EXPLAIN` cache provenance.
+> **Status:** intermediate step landed: the cache now stores Arrow `RecordBatch`es, is thread-safe (`Arc<Cache>`), enforces a configurable max-entries LRU bound and TTL (injectable clock, tested without sleeps), keys on quote-aware whitespace-normalized SQL, and exposes hit/miss/eviction counters via `stats()`. It serves the pgwire path: `igloo serve` answers repeated SELECT/WITH statements from cache (side-effecting statements bypass it) and a background CDC polling task keeps it fresh — proven by an end-to-end integration test (cached result → upstream change + CDC event → fresh result within the poll interval). Still open for the criteria below: plan-fingerprint keying, a byte-budget (entries-count only today), metrics export, and `EXPLAIN` cache provenance.
 
 **Acceptance criteria**
 - [ ] Cache stores Arrow data; a cache hit returns batches byte-identical (schema + data) to a fresh execution, verified by an integration test. *(Storage is Arrow-native now; the integration-test assertion is still to be written.)*
@@ -141,7 +141,7 @@ Replace the dummy JSON reader with a CDC listener consuming Postgres logical rep
 
 ### F2.2 Dependency-aware cache invalidation
 
-Today any CDC event clears the entire cache (`src/cdc_sync.rs:45-52`) — safe, but it destroys the hit-rate under any write load. Replace this with plan-time extraction of the upstream tables each cached entry depends on, plus a reverse index (table → cache keys), so a CDC event for a table invalidates exactly the dependent entries.
+Today any new CDC event clears the entire cache — safe, but it destroys the hit-rate under any write load. (The invalidation *loop* already runs live: serve mode polls the CDC location on `cdc_poll_seconds`, deduplicates already-seen events, and clears the cache on new ones.) Replace whole-cache clearing with plan-time extraction of the upstream tables each cached entry depends on, plus a reverse index (table → cache keys), so a CDC event for a table invalidates exactly the dependent entries.
 
 **Acceptance criteria**
 - [ ] Table-dependency extraction from the logical plan handles joins, subqueries, CTEs, and views; unit-tested against a corpus of ≥ 30 queries including the current demo join.

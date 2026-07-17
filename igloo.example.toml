@@ -32,3 +32,8 @@ postgres_uri = "postgres://postgres:postgres@localhost:5432/mydb"
 # IGLOO_CACHE_MAX_ENTRIES / IGLOO_CACHE_TTL_SECONDS. Must be positive.
 # cache_max_entries = 1024
 # cache_ttl_seconds = 300
+
+# How often `igloo serve` polls cdc_path for new CDC events that
+# invalidate the cache (optional; default shown). Env override:
+# IGLOO_CDC_POLL_SECONDS. Must be positive.
+# cdc_poll_seconds = 10
