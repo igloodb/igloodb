@@ -59,7 +59,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Runs the pgwire server until killed.
+/// Runs the pgwire server until killed, with the query cache kept fresh
+/// by a background CDC polling task.
 async fn serve(config: config::Config) -> Result<()> {
     let listen_addr = match config.require_listen_addr() {
         Ok(addr) => addr.to_string(),
@@ -72,7 +73,12 @@ async fn serve(config: config::Config) -> Result<()> {
     log::info!("Initializing DataFusionEngine for serve mode...");
     let engine =
         Arc::new(DataFusionEngine::new(&config.parquet_path, config.postgres_uri.expose()).await?);
-    server::serve(engine, &listen_addr).await
+
+    let cache = Arc::new(Cache::new(config.cache_max_entries, config.cache_ttl));
+    let cdc = Arc::new(CdcListener::new(&config.cdc_path));
+    cdc.spawn_polling(cache.clone(), config.cdc_poll_interval);
+
+    server::serve(engine, cache, &listen_addr).await
 }
 
 /// Loads configuration, exiting with a clear message on failure so a

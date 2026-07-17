@@ -29,28 +29,34 @@ use pgwire::messages::PgWireBackendMessage;
 use pgwire::tokio::process_socket;
 use tokio::net::TcpListener;
 
+use crate::cache_layer::Cache;
 use crate::datafusion_engine::DataFusionEngine;
 use crate::errors::Result;
 
 /// Binds `listen_addr` and serves connections until the task is aborted.
-pub async fn serve(engine: Arc<DataFusionEngine>, listen_addr: &str) -> Result<()> {
+pub async fn serve(
+    engine: Arc<DataFusionEngine>,
+    cache: Arc<Cache>,
+    listen_addr: &str,
+) -> Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
     log::warn!(
         "pgwire endpoint on {} is UNAUTHENTICATED plaintext (F1.1 spike); \
          do not expose it beyond localhost or a trusted network",
         listen_addr
     );
-    serve_with_listener(engine, listener).await
+    serve_with_listener(engine, cache, listener).await
 }
 
 /// Serves connections on an already-bound listener. Split from [`serve`]
 /// so tests can bind port 0 and discover the address first.
 pub async fn serve_with_listener(
     engine: Arc<DataFusionEngine>,
+    cache: Arc<Cache>,
     listener: TcpListener,
 ) -> Result<()> {
     let factory = Arc::new(IglooHandlerFactory {
-        handler: Arc::new(IglooQueryHandler { engine }),
+        handler: Arc::new(IglooQueryHandler { engine, cache }),
     });
     log::info!(
         "Igloo pgwire server listening on {}",
@@ -74,6 +80,18 @@ pub async fn serve_with_listener(
 
 struct IglooQueryHandler {
     engine: Arc<DataFusionEngine>,
+    cache: Arc<Cache>,
+}
+
+/// Only read-only statements may be served from (or populate) the cache;
+/// anything else could have side effects that must reach the engine.
+fn is_cacheable(query: &str) -> bool {
+    let head = query.trim_start();
+    let keyword: String = head
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    keyword.eq_ignore_ascii_case("SELECT") || keyword.eq_ignore_ascii_case("WITH")
 }
 
 /// Startup without authentication: every connection is accepted. This is
@@ -89,6 +107,14 @@ impl SimpleQueryHandler for IglooQueryHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         log::debug!("pgwire query: {}", query);
+
+        if is_cacheable(query) {
+            if let Some(batches) = self.cache.get(query) {
+                log::debug!("pgwire cache hit");
+                return Ok(vec![batches_to_response(&batches)?]);
+            }
+        }
+
         // A failed query becomes an ErrorResponse; pgwire keeps the
         // connection alive for the next query.
         let batches = self
@@ -96,7 +122,11 @@ impl SimpleQueryHandler for IglooQueryHandler {
             .query(query)
             .await
             .map_err(|e| user_error(e.to_string()))?;
-        Ok(vec![batches_to_response(&batches)?])
+        let response = batches_to_response(&batches)?;
+        if is_cacheable(query) {
+            self.cache.set(query, batches);
+        }
+        Ok(vec![response])
     }
 }
 
@@ -398,5 +428,16 @@ mod tests {
     fn empty_result_becomes_zero_row_tag() {
         let response = batches_to_response(&[]).unwrap();
         assert!(matches!(response, Response::Execution(_)));
+    }
+
+    #[test]
+    fn only_read_statements_are_cacheable() {
+        assert!(is_cacheable("SELECT 1"));
+        assert!(is_cacheable("  select * from t"));
+        assert!(is_cacheable("WITH x AS (SELECT 1) SELECT * FROM x"));
+        assert!(!is_cacheable("INSERT INTO t VALUES (1)"));
+        assert!(!is_cacheable("SET search_path = public"));
+        assert!(!is_cacheable("CREATE TABLE t (a int)"));
+        assert!(!is_cacheable(""));
     }
 }
