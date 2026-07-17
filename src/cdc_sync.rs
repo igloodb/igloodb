@@ -24,7 +24,7 @@ impl CdcListener {
     /// Any event means the source data may have changed, so all cached
     /// results are conservatively invalidated. Finer-grained invalidation
     /// (per table / per key) is on the roadmap.
-    pub fn sync(&self, cache: &mut Cache) -> usize {
+    pub fn sync(&self, cache: &Cache) -> usize {
         let path = Path::new(&self.iceberg_path);
         if !path.is_dir() {
             // Remote (e.g. s3://...) CDC sources are not supported yet.
@@ -81,6 +81,11 @@ impl CdcListener {
 mod tests {
     use super::CdcListener;
     use crate::cache_layer::Cache;
+    use std::time::Duration;
+
+    fn test_cache() -> Cache {
+        Cache::new(16, Duration::from_secs(300))
+    }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir =
@@ -95,11 +100,11 @@ mod tests {
         let dir = temp_dir("events");
         std::fs::write(dir.join("event1.json"), r#"{"event": "update"}"#).unwrap();
 
-        let mut cache = Cache::new();
-        cache.set("SELECT 1", "stale result");
+        let cache = test_cache();
+        cache.set("SELECT 1", Vec::new());
 
         let listener = CdcListener::new(dir.to_str().unwrap());
-        let n = listener.sync(&mut cache);
+        let n = listener.sync(&cache);
 
         assert_eq!(n, 1);
         assert!(
@@ -113,11 +118,11 @@ mod tests {
     fn sync_keeps_cache_when_no_events() {
         let dir = temp_dir("no_events");
 
-        let mut cache = Cache::new();
-        cache.set("SELECT 1", "fresh result");
+        let cache = test_cache();
+        cache.set("SELECT 1", Vec::new());
 
         let listener = CdcListener::new(dir.to_str().unwrap());
-        let n = listener.sync(&mut cache);
+        let n = listener.sync(&cache);
 
         assert_eq!(n, 0);
         assert_eq!(cache.len(), 1, "cache should be untouched without events");
@@ -126,11 +131,11 @@ mod tests {
 
     #[test]
     fn sync_handles_missing_directory() {
-        let mut cache = Cache::new();
-        cache.set("SELECT 1", "result");
+        let cache = test_cache();
+        cache.set("SELECT 1", Vec::new());
 
         let listener = CdcListener::new("s3://some-bucket/does-not-exist");
-        let n = listener.sync(&mut cache);
+        let n = listener.sync(&cache);
 
         assert_eq!(n, 0);
         assert_eq!(cache.len(), 1);
@@ -141,11 +146,11 @@ mod tests {
         let dir = temp_dir("non_json");
         std::fs::write(dir.join("notes.txt"), "not an event").unwrap();
 
-        let mut cache = Cache::new();
-        cache.set("SELECT 1", "result");
+        let cache = test_cache();
+        cache.set("SELECT 1", Vec::new());
 
         let listener = CdcListener::new(dir.to_str().unwrap());
-        let n = listener.sync(&mut cache);
+        let n = listener.sync(&cache);
 
         assert_eq!(n, 0);
         assert_eq!(cache.len(), 1);

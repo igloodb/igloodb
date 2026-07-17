@@ -1,0 +1,34 @@
+# Igloo configuration.
+#
+# Copy to `igloo.toml` (or point IGLOO_CONFIG at any path) and adjust.
+# Environment variables override file values:
+#
+#   IGLOO_PARQUET_PATH            overrides parquet_path
+#   IGLOO_CDC_PATH                overrides cdc_path
+#   DATABASE_URL / IGLOO_POSTGRES_URI  override postgres_uri
+#                                 (DATABASE_URL wins when both are set)
+#
+# Every value below is required (via the file or the environment). Igloo
+# fails fast at startup if any is missing — there are no built-in defaults.
+
+# Directory of Parquet files registered as the `iceberg` table.
+parquet_path = "./dummy_iceberg_cdc/"
+
+# Directory watched for CDC event files (JSON); any event invalidates the cache.
+cdc_path = "./dummy_iceberg_cdc"
+
+# PostgreSQL connection string: URI or key-value form.
+# Prefer setting this via DATABASE_URL / IGLOO_POSTGRES_URI instead of
+# committing credentials to a file.
+postgres_uri = "postgres://postgres:postgres@localhost:5432/mydb"
+
+# Address for the pgwire server started by `igloo serve` (env override:
+# IGLOO_LISTEN_ADDR). Optional — only required in serve mode. The endpoint
+# is currently UNAUTHENTICATED plaintext; keep it on localhost or a
+# trusted network.
+# listen_addr = "127.0.0.1:5442"
+
+# Query-result cache tuning (optional; defaults shown). Env overrides:
+# IGLOO_CACHE_MAX_ENTRIES / IGLOO_CACHE_TTL_SECONDS. Must be positive.
+# cache_max_entries = 1024
+# cache_ttl_seconds = 300

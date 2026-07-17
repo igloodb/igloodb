@@ -99,17 +99,32 @@ Running Igloo locally requires you to manage dependencies and environment setup 
         ```
     This will compile and run the Igloo application.
 
+### Running the SQL server (`igloo serve`)
+
+Igloo can run as a long-lived server speaking the **PostgreSQL wire protocol**, so `psql`, BI tools, and any Postgres driver can query it directly:
+
+```sh
+IGLOO_LISTEN_ADDR=127.0.0.1:5442 cargo run -- serve
+# in another shell:
+psql -h 127.0.0.1 -p 5442 -c "SELECT * FROM iceberg LIMIT 10"
+```
+
+`listen_addr`/`IGLOO_LISTEN_ADDR` is required in serve mode (fail-fast). The registered tables (`iceberg`, `pg_table`) are queryable with arbitrary SQL, including joins and aggregates. **The endpoint is currently unauthenticated plaintext** (see roadmap F4.2 for auth/TLS) — keep it on localhost or a trusted network.
+
 ## 🏗️ Example Code
 
 ```rust
-use cache_layer::Cache;
-use cdc_sync::CdcListener;
+use std::time::Duration;
+
 use datafusion::arrow::util::pretty::pretty_format_batches;
-use datafusion_engine::DataFusionEngine;
+use igloo::cache_layer::Cache;
+use igloo::cdc_sync::CdcListener;
+use igloo::datafusion_engine::DataFusionEngine;
 
 #[tokio::main]
-async fn main() -> errors::Result<()> {
-    let mut cache = Cache::new();
+async fn main() -> igloo::errors::Result<()> {
+    // Arrow-native cache: bounded (LRU) with a TTL, safe to share as Arc<Cache>.
+    let cache = Cache::new(1024, Duration::from_secs(300));
     let cdc = CdcListener::new("./dummy_iceberg_cdc");
 
     let engine = DataFusionEngine::new(
@@ -123,18 +138,20 @@ async fn main() -> errors::Result<()> {
                  JOIN pg_table p ON i.user_id = p.user_id \
                  WHERE i.user_id = 42";
 
-    if let Some(result) = cache.get(query) {
-        println!("Cache hit:\n{}", result);
+    if let Some(batches) = cache.get(query) {
+        println!("Cache hit:\n{}", pretty_format_batches(&batches)?);
     } else {
         let batches = engine.query(query).await?;
-        let result = pretty_format_batches(&batches)?.to_string();
-        cache.set(query, &result);
-        println!("Cache miss. Executed with DataFusion:\n{}", result);
+        println!(
+            "Cache miss. Executed with DataFusion:\n{}",
+            pretty_format_batches(&batches)?
+        );
+        cache.set(query, batches);
     }
 
     // Invalidates cached results when CDC events are found.
     // (In production, CDC sync should run asynchronously.)
-    cdc.sync(&mut cache);
+    cdc.sync(&cache);
     Ok(())
 }
 ```
@@ -147,9 +164,18 @@ cargo fmt --all -- --check                            # formatting (enforced by 
 cargo clippy --all-targets --all-features -- -D warnings  # lints (enforced by CI)
 ```
 
+Integration tests exercise the federated Parquet ⋈ PostgreSQL path against a live database and are skipped unless `IGLOO_TEST_POSTGRES_URI` points at a PostgreSQL instance the tests may freely create tables in (CI runs them against a service container):
+
+```sh
+IGLOO_TEST_POSTGRES_URI=postgres://postgres:postgres@localhost:5432/igloo_test \
+    cargo test --test postgres_federation
+```
+
 ## 🛠️ Environment Variable Reference
 
-Igloo's behavior is controlled by several environment variables. When running locally, these can be set in a `.env` file (by copying `.env.example`) or directly in your shell. When using Docker Compose, these are typically set within the `docker-compose.yml` file for the `igloo` service.
+Igloo's behavior is controlled by a small set of required settings. They can come from a TOML config file (`igloo.toml` in the working directory, or any path via `IGLOO_CONFIG` — see `igloo.example.toml`) and/or environment variables, with **environment variables taking precedence**. When running locally, environment variables can be set in a `.env` file (by copying `.env.example`) or directly in your shell. When using Docker Compose, these are set within the `docker-compose.yml` file for the `igloo` service.
+
+**Igloo fails fast:** every setting below is required, and startup aborts with an error naming the missing setting if one is absent. There are no built-in localhost defaults.
 
 ### General Configuration
 
@@ -159,19 +185,21 @@ Igloo's behavior is controlled by several environment variables. When running lo
     *   **Example (Docker):** `postgres://postgres:postgres@postgres:5432/mydb` (points to the `postgres` service in Docker)
 
 *   `IGLOO_POSTGRES_URI`:
-    *   **Purpose:** Specifies the connection string for the PostgreSQL database if `DATABASE_URL` is not set.
-    *   **Default (in code):** `postgres://postgres:postgres@localhost:5432/mydb`
+    *   **Purpose:** Specifies the connection string for the PostgreSQL database if `DATABASE_URL` is not set (config file key: `postgres_uri`).
     *   **Note:** Both the URI scheme and the keyword/value format (`host=... user=...`) are accepted for the DataFusion Postgres table; the ADBC driver requires the URI scheme.
 
 *   `IGLOO_PARQUET_PATH`:
-    *   **Purpose:** Defines the file system path to the directory containing Parquet files, which represent the Iceberg table data for this project.
-    *   **Default (in code):** `./dummy_iceberg_cdc/`
+    *   **Purpose:** Defines the file system path to the directory containing Parquet files, which represent the Iceberg table data for this project (config file key: `parquet_path`).
+    *   **Example (local):** `./dummy_iceberg_cdc/`
     *   **Example (Docker):** `/app/dummy_iceberg_cdc/` (path inside the Igloo container)
 
 *   `IGLOO_CDC_PATH`:
-    *   **Purpose:** Sets the file system path for the Change Data Capture (CDC) listener to monitor for changes. In this project, it's often the same as `IGLOO_PARQUET_PATH`.
-    *   **Default (in code):** `./dummy_iceberg_cdc`
+    *   **Purpose:** Sets the file system path for the Change Data Capture (CDC) listener to monitor for changes. In this project, it's often the same as `IGLOO_PARQUET_PATH` (config file key: `cdc_path`).
+    *   **Example (local):** `./dummy_iceberg_cdc`
     *   **Example (Docker):** `/app/dummy_iceberg_cdc` (path inside the Igloo container)
+
+*   `IGLOO_CONFIG`:
+    *   **Purpose:** Optional path to a TOML config file providing the settings above (see `igloo.example.toml`). Environment variables override file values. If unset, `./igloo.toml` is used when present.
 
 ### ADBC Driver Configuration (for Local Execution)
 

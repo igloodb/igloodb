@@ -18,7 +18,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 async-trait = "0.1"
 chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 thiserror = "1"
 log = "0.4"
 env_logger = "0.11"
 num_cpus = "1"
+pgwire = "0.30.2"
+futures = "0.3.32"
