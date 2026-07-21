@@ -51,6 +51,7 @@ struct FileConfig {
     parquet_path: Option<String>,
     cdc_path: Option<String>,
     postgres_uri: Option<String>,
+    postgres_schemas: Option<Vec<String>>,
     listen_addr: Option<String>,
     cache_max_entries: Option<u64>,
     cache_ttl_seconds: Option<u64>,
@@ -63,6 +64,8 @@ const DEFAULT_CACHE_MAX_ENTRIES: u64 = 1024;
 const DEFAULT_CACHE_TTL_SECONDS: u64 = 300;
 /// Default CDC polling interval in serve mode.
 const DEFAULT_CDC_POLL_SECONDS: u64 = 10;
+/// Default PostgreSQL schema to introspect when none is configured.
+const DEFAULT_POSTGRES_SCHEMA: &str = "public";
 
 /// Fully-resolved application configuration.
 #[derive(Debug)]
@@ -73,6 +76,9 @@ pub struct Config {
     pub cdc_path: String,
     /// PostgreSQL connection string (URI or key-value form).
     pub postgres_uri: Secret,
+    /// PostgreSQL schemas (namespaces) to introspect for tables to register
+    /// (default `["public"]`). Never empty after validation.
+    pub postgres_schemas: Vec<String>,
     /// Address for the pgwire server (`igloo serve`). Optional because the
     /// demo mode doesn't need it; serve mode fails fast when it is absent.
     pub listen_addr: Option<String>,
@@ -126,6 +132,17 @@ impl Config {
             .or_else(|| env("IGLOO_POSTGRES_URI"))
             .or(file.postgres_uri)
             .ok_or_else(|| missing("postgres_uri", "IGLOO_POSTGRES_URI or DATABASE_URL"))?;
+        // Env is a comma-separated list; file is a TOML array. Env wins when
+        // set. Absent everywhere → the documented default of ["public"].
+        let postgres_schemas = env("IGLOO_POSTGRES_SCHEMAS")
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .or(file.postgres_schemas)
+            .unwrap_or_else(|| vec![DEFAULT_POSTGRES_SCHEMA.to_string()]);
         let listen_addr = env("IGLOO_LISTEN_ADDR").or(file.listen_addr);
         let cache_max_entries = env_u64(&env, "IGLOO_CACHE_MAX_ENTRIES")?
             .or(file.cache_max_entries)
@@ -141,6 +158,7 @@ impl Config {
             parquet_path,
             cdc_path,
             postgres_uri: Secret::new(postgres_uri),
+            postgres_schemas,
             listen_addr,
             cache_max_entries: cache_max_entries as usize,
             cache_ttl: std::time::Duration::from_secs(cache_ttl_seconds),
@@ -186,6 +204,16 @@ impl Config {
         if self.cdc_poll_interval.is_zero() {
             return Err(IglooError::Config(
                 "cdc_poll_seconds must be positive".into(),
+            ));
+        }
+        if self.postgres_schemas.is_empty() {
+            return Err(IglooError::Config(
+                "postgres_schemas must list at least one schema".into(),
+            ));
+        }
+        if self.postgres_schemas.iter().any(|s| s.trim().is_empty()) {
+            return Err(IglooError::Config(
+                "postgres_schemas must not contain empty schema names".into(),
             ));
         }
         Ok(())
@@ -238,6 +266,7 @@ mod tests {
             parquet_path: Some("/data/parquet".into()),
             cdc_path: Some("/data/cdc".into()),
             postgres_uri: Some("postgres://u:p@db:5432/mydb".into()),
+            postgres_schemas: None,
             listen_addr: None,
             cache_max_entries: None,
             cache_ttl_seconds: None,
@@ -354,6 +383,58 @@ mod tests {
         });
         let err = bad_env.unwrap_err().to_string();
         assert!(err.contains("IGLOO_CACHE_TTL_SECONDS"), "got: {}", err);
+    }
+
+    #[test]
+    fn postgres_schemas_defaults_to_public() {
+        let config = Config::from_sources(full_file(), no_env).unwrap();
+        assert_eq!(config.postgres_schemas, vec!["public".to_string()]);
+    }
+
+    #[test]
+    fn postgres_schemas_from_file() {
+        let file = FileConfig {
+            postgres_schemas: Some(vec!["public".into(), "analytics".into()]),
+            ..full_file()
+        };
+        let config = Config::from_sources(file, no_env).unwrap();
+        assert_eq!(config.postgres_schemas, vec!["public", "analytics"]);
+    }
+
+    #[test]
+    fn postgres_schemas_env_overrides_file_and_splits_csv() {
+        let file = FileConfig {
+            postgres_schemas: Some(vec!["fromfile".into()]),
+            ..full_file()
+        };
+        let config = Config::from_sources(file, |key| {
+            (key == "IGLOO_POSTGRES_SCHEMAS").then(|| " public , analytics ,reporting".to_string())
+        })
+        .unwrap();
+        assert_eq!(
+            config.postgres_schemas,
+            vec!["public", "analytics", "reporting"],
+            "env wins, is trimmed and split on commas"
+        );
+    }
+
+    #[test]
+    fn empty_postgres_schemas_list_is_rejected() {
+        let file = FileConfig {
+            postgres_schemas: Some(vec![]),
+            ..full_file()
+        };
+        let err = Config::from_sources(file, no_env).unwrap_err().to_string();
+        assert!(err.contains("postgres_schemas"), "got: {}", err);
+
+        // An env value of only commas/whitespace collapses to empty and is
+        // rejected too, rather than silently falling back to a default.
+        let err = Config::from_sources(full_file(), |key| {
+            (key == "IGLOO_POSTGRES_SCHEMAS").then(|| " , ".to_string())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("postgres_schemas"), "got: {}", err);
     }
 
     #[test]

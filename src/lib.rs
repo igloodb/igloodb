@@ -5,6 +5,7 @@
 
 pub mod adbc_postgres;
 pub mod cache_layer;
+pub mod catalog;
 pub mod cdc_sync;
 pub mod config;
 pub mod datafusion_engine;

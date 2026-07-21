@@ -9,18 +9,38 @@ use datafusion::prelude::*;
 
 use std::sync::Arc;
 
-use crate::errors::Result;
+use tokio_postgres::NoTls;
+
+use crate::catalog;
+use crate::errors::{IglooError, Result};
 use crate::postgres_table::PostgresTable;
+
+/// The legacy table name the demo binary and pre-F1.3 integration tests
+/// query. When a `my_pg_table` is discovered it is additionally registered
+/// under this alias for backward compatibility.
+const LEGACY_ALIAS: &str = "pg_table";
+/// The upstream table name the legacy alias points at.
+const LEGACY_SOURCE_TABLE: &str = "my_pg_table";
 
 pub struct DataFusionEngine {
     pub ctx: SessionContext,
 }
 
 impl DataFusionEngine {
-    pub async fn new(parquet_path: &str, postgres_conn_str: &str) -> Result<Self> {
-        let ctx = SessionContext::new();
+    /// Builds the engine, registering the Parquet-backed `iceberg` table and
+    /// every PostgreSQL base table discovered in `postgres_schemas` (default
+    /// `["public"]`).
+    pub async fn new(
+        parquet_path: &str,
+        postgres_conn_str: &str,
+        postgres_schemas: &[String],
+    ) -> Result<Self> {
+        // Enable DataFusion's information_schema so BI tools (and tests) can
+        // run `SHOW TABLES` / query `information_schema` against Igloo.
+        let ctx =
+            SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
         Self::register_iceberg_table(&ctx, parquet_path)?;
-        Self::register_postgres_table(&ctx, postgres_conn_str).await?;
+        Self::register_postgres_tables(&ctx, postgres_conn_str, postgres_schemas).await?;
         log::info!("DataFusion context initialized with Iceberg and Postgres tables.");
         Ok(Self { ctx })
     }
@@ -48,15 +68,79 @@ impl DataFusionEngine {
         Ok(())
     }
 
-    /// Registers the PostgreSQL-backed table as `pg_table`.
-    async fn register_postgres_table(ctx: &SessionContext, postgres_conn_str: &str) -> Result<()> {
-        let pg_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("user_id", DataType::Int64, false),
-            Field::new("extra_info", DataType::Utf8, true),
-        ]));
-        let pg_provider =
-            Arc::new(PostgresTable::try_new(postgres_conn_str, "my_pg_table", pg_schema).await?);
-        ctx.register_table("pg_table", pg_provider)?;
+    /// Introspects PostgreSQL and registers one DataFusion table per
+    /// discovered base table in `schemas`.
+    ///
+    /// Each table is registered under its bare name; on a name collision
+    /// across schemas the first (in schema-priority order) keeps the bare
+    /// name and the later one is registered as `schema__table` (see
+    /// [`catalog::resolve_registration_names`]). For backward compatibility a
+    /// discovered `my_pg_table` is additionally registered under the legacy
+    /// alias `pg_table`. If no tables are found the engine still starts (with
+    /// a warning) — the Parquet source may be all that's needed.
+    async fn register_postgres_tables(
+        ctx: &SessionContext,
+        postgres_conn_str: &str,
+        schemas: &[String],
+    ) -> Result<()> {
+        // One shared connection drives introspection and every table's scans.
+        let (client, connection) = tokio_postgres::connect(postgres_conn_str, NoTls)
+            .await
+            .map_err(IglooError::Postgres)?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("PostgreSQL connection error: {}", e);
+            }
+        });
+        let client = Arc::new(client);
+
+        let tables = catalog::introspect_tables(&client, schemas).await?;
+        if tables.is_empty() {
+            log::warn!(
+                "no PostgreSQL base tables found in schemas {:?}; \
+                 starting with no Postgres tables registered",
+                schemas
+            );
+            return Ok(());
+        }
+
+        let mut legacy_registered = false;
+        for (reg_name, table) in catalog::resolve_registration_names(&tables) {
+            let arrow_schema = Arc::new(ArrowSchema::new(table.fields.clone()));
+            let provider = Arc::new(PostgresTable::from_client(
+                client.clone(),
+                &table.schema,
+                &table.name,
+                arrow_schema.clone(),
+            ));
+            ctx.register_table(reg_name.as_str(), provider)?;
+            log::info!(
+                "registered Postgres table {}.{} as {:?} ({} column(s))",
+                table.schema,
+                table.name,
+                reg_name,
+                table.fields.len()
+            );
+
+            // Backward compatibility: expose my_pg_table under `pg_table` too.
+            if !legacy_registered && table.name == LEGACY_SOURCE_TABLE {
+                let alias_provider = Arc::new(PostgresTable::from_client(
+                    client.clone(),
+                    &table.schema,
+                    &table.name,
+                    arrow_schema,
+                ));
+                ctx.register_table(LEGACY_ALIAS, alias_provider)?;
+                legacy_registered = true;
+                log::info!(
+                    "registered legacy alias {:?} -> {}.{} (deprecated; \
+                     prefer the bare table name)",
+                    LEGACY_ALIAS,
+                    table.schema,
+                    table.name
+                );
+            }
+        }
         Ok(())
     }
 

@@ -79,7 +79,7 @@ async fn federated_join_returns_matching_row_from_both_sources() {
     write_parquet_fixture(&dir);
     seed_postgres(&uri).await;
 
-    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri)
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
         .await
         .expect("engine initialization against live Postgres failed");
 
