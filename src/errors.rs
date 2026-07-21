@@ -18,6 +18,9 @@ pub enum IglooError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("Parquet error: {0}")]
+    Parquet(#[from] datafusion::parquet::errors::ParquetError),
+
     #[error("Configuration error: {0}")]
     Config(String),
 

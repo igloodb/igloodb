@@ -8,6 +8,7 @@ pub mod cache_layer;
 pub mod catalog;
 pub mod cdc_sync;
 pub mod config;
+pub mod crypto_metrics;
 pub mod datafusion_engine;
 pub mod errors;
 pub mod postgres_table;

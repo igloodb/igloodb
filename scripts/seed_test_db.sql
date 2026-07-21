@@ -17,3 +17,14 @@ INSERT INTO my_pg_table (user_id, extra_info) VALUES
     (42, 'answer to everything'),
     (7, 'lucky number'),
     (100, NULL);
+
+-- Reference table for the crypto-metrics federated integration test
+-- (src/crypto_metrics.rs): maps asset symbols to display names.
+CREATE TABLE IF NOT EXISTS crypto_assets (asset TEXT NOT NULL, name TEXT NOT NULL);
+
+TRUNCATE crypto_assets;
+
+INSERT INTO crypto_assets (asset, name) VALUES
+    ('BTC', 'Bitcoin'),
+    ('ETH', 'Ethereum'),
+    ('SOL', 'Solana');

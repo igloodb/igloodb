@@ -45,6 +45,7 @@ igloodb/
     ├── adbc_postgres.rs     # standalone ADBC FFI query path + batch printer
     ├── cache_layer.rs       # Arrow-native bounded LRU+TTL thread-safe cache
     ├── cdc_sync.rs          # CDC listener: sync + background polling loop
+    ├── crypto_metrics.rs    # crypto OHLCV table + market-metric SQL suite (crypto-demo)
     └── errors.rs            # IglooError enum + Result alias
 ```
 
@@ -114,6 +115,11 @@ Key decisions:
 - `read_local_events` reads every `*.json` file's contents as an opaque string (`:57-77`, extension filter `:69`); event bodies are logged but never parsed.
 Collaboration: mutates `Cache`; driven synchronously by `main`.
 Tests: four tests covering events-present invalidation, no-events retention, missing/remote directory, and non-JSON files (`:93-153`).
+
+### `src/crypto_metrics.rs` — crypto market metrics
+Responsibility: showcase the engine on cryptocurrency market data. Registers an OHLCV candle table (`crypto_ohlcv`, a Parquet `ListingTable` like `iceberg`) and provides pure SQL builders for a market-metric suite: latest close, daily volume, daily VWAP, `SMA(n)`, rolling `n`-candle log-return volatility (`LAG` + `STDDEV_SAMP` window), and maximum drawdown (running-max window). `igloo crypto-demo` (dispatched in `main.rs` before config loading — it needs no Postgres) generates a deterministic synthetic dataset when the target directory has no Parquet and prints the whole suite.
+Key decisions: metric SQL is built by pure functions so the generated SQL is unit-testable, mirroring `build_scan_sql`; the sample-data generator uses an inline LCG for reproducible noise (synthetic fixture data only — explicitly not a cryptographic or statistical RNG); the `crypto_assets` Postgres reference table (seeded by `scripts/seed_test_db.sql`) enables a federated volume-by-asset-name metric, exercised by an env-gated integration test.
+Tests: SQL builders pinned by exact strings; a four-candle hand fixture asserting exact metric values through DataFusion (VWAP 108.0, drawdown 99/110−1, SMA(2) sequence); a full-suite run over generated data; and the federated integration test.
 
 ### `src/errors.rs` — error model
 Responsibility: unify library errors.
@@ -201,7 +207,8 @@ All fallible code returns `IglooError`/`Result` (`src/errors.rs:4-25`). Library 
 - Arrow errors become `IglooError::Arrow` — used explicitly for the ADBC batch-collection failure (`src/adbc_postgres.rs:56`, variant `src/errors.rs:9-10`).
 - `tokio_postgres::Error` becomes `IglooError::Postgres` (`src/errors.rs:12-13`), used directly in `try_new` (`src/postgres_table.rs:40`).
 - `adbc_core::error::Error` becomes `IglooError::AdbcCore` (`src/errors.rs:15-16`), produced implicitly by `?` on the ADBC driver/statement calls (`src/adbc_postgres.rs:22-34`).
-- `UnsupportedArrowType` is raised for unmapped column types during a scan (`src/postgres_table.rs:213-217`).
+- `UnsupportedArrowType` is raised for unmapped column types during a scan.
+- Later additions on this branch/`main`: `Config(String)` for fail-fast configuration errors and `Parquet(#[from] ParquetError)` for the crypto sample-data writer.
 
 A structural wrinkle: inside `PostgresTable::scan` the function signature is DataFusion's `DFResult`, so it cannot use `?` to yield an `IglooError`. Instead Postgres errors are boxed as `DataFusionError::External(Box::new(IglooError::Postgres(..)))` (`src/postgres_table.rs:96`, `:127-129`) and Arrow build errors as `DataFusionError::ArrowError(..)` (`:101`, `:223`). When such an error later surfaces from `engine.query`, it is re-wrapped as `IglooError::DataFusion`, so a Postgres failure during scan reaches `main` labeled as a DataFusion error, not a Postgres one.
 
@@ -222,6 +229,7 @@ A structural wrinkle: inside `PostgresTable::scan` the function signature is Dat
 | `tests/postgres_federation.rs` | 1 (env-gated) | live federated Parquet ⋈ Postgres join end-to-end. |
 | `tests/pgwire_server.rs` | 2 | pgwire server round-trips against the cache. |
 | `cdc_sync.rs` | 4 (`:93-153`) | events-present invalidation, no-events retention, missing/remote dir, non-JSON ignored. Good coverage of `sync`/`read_local_events`. |
+| `crypto_metrics.rs` | 3 unit + 1 integration | pinned metric SQL, exact hand-computed metric values through DataFusion, full-suite run over generated data; federated volume-by-name vs live Postgres (env-gated). |
 | `datafusion_engine.rs` | 3 | Parquet `iceberg` registration + query with filter/projection, empty-parquet-directory (the shipped demo condition) yields zero rows, second-row projection. |
 | `postgres_table.rs` | 23 unit + 4 integration | `quote_ident`; `build_scan_sql` incl. WHERE/LIMIT/COUNT paths and quoting; the translation whitelist (all accepted operators, literal-on-left, escaping, IS NULL, AND/OR/NOT nesting) and seven rejection cases; integration (gated on `IGLOO_TEST_POSTGRES_URI`, seeded via `scripts/seed_test_db.sql`): pushed `=`, pushed `IS NULL`, unsupported text-ordering re-filtered above the scan, and filtered COUNT — all through a real DataFusion `SessionContext` against live PostgreSQL. |
 | `adbc_postgres.rs` | 4 | `print_arrow_batch`: supported types incl. nulls, zero-row batch, Int64, Int16+Float32. |

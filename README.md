@@ -111,6 +111,18 @@ psql -h 127.0.0.1 -p 5442 -c "SELECT * FROM iceberg LIMIT 10"
 
 `listen_addr`/`IGLOO_LISTEN_ADDR` is required in serve mode (fail-fast). The registered tables (`iceberg`, `pg_table`) are queryable with arbitrary SQL, including joins and aggregates. **The endpoint is currently unauthenticated plaintext** (see roadmap F4.2 for auth/TLS) — keep it on localhost or a trusted network.
 
+### Crypto market metrics demo (`igloo crypto-demo`)
+
+A self-contained showcase of the engine on crypto market data — no Postgres or configuration needed. It synthesizes a week of deterministic hourly OHLCV candles for BTC/ETH/SOL (unless the target directory already holds Parquet data) and computes a metric suite through DataFusion: latest close, daily volume, daily VWAP, SMA(24), rolling 24h log-return volatility, and maximum drawdown:
+
+```sh
+cargo run -- crypto-demo                       # writes sample data to ./crypto_ohlcv_data
+IGLOO_CRYPTO_PARQUET_PATH=/data/ohlcv \
+    cargo run -- crypto-demo                   # or point it at your own OHLCV Parquet files
+```
+
+The metric SQL builders live in `src/crypto_metrics.rs` and also work against the `crypto_ohlcv` table from your own sessions; a federated variant joins the Postgres `crypto_assets` reference table (see `scripts/seed_test_db.sql`).
+
 ## 🏗️ Example Code
 
 ```rust
@@ -235,6 +247,7 @@ Igloo relies on ADBC C++ drivers (such as the PostgreSQL driver) via Rust's Fore
 - 🔄 CDC-Driven Invalidation from JSON event files (Iceberg planned)
 - 🔌 Join Support for Postgres + Arrow datasets
 - ⬇️ Conservative filter pushdown to PostgreSQL (exactly-equivalent predicates only)
+- 📈 Crypto market metrics over OHLCV data (VWAP, SMA, rolling volatility, max drawdown) via `igloo crypto-demo`
 - 🧪 Designed for extensibility (remote cache, metrics, etc.)
 
 ## 🔮 Roadmap

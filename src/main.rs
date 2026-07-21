@@ -14,6 +14,17 @@ async fn main() -> Result<()> {
     // Logs go to stderr. Defaults to `info` but respects RUST_LOG if set.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // `igloo crypto-demo` is self-contained (Parquet-only): it synthesizes
+    // deterministic sample OHLCV data if the directory is empty and prints a
+    // suite of crypto market metrics computed through DataFusion. It needs no
+    // Postgres and deliberately skips config loading, which would otherwise
+    // fail fast on settings the demo doesn't use.
+    if std::env::args().nth(1).as_deref() == Some("crypto-demo") {
+        let dir = std::env::var("IGLOO_CRYPTO_PARQUET_PATH")
+            .unwrap_or_else(|_| "./crypto_ohlcv_data".to_string());
+        return igloo::crypto_metrics::run_crypto_demo(&dir).await;
+    }
+
     let config = load_config_or_exit();
 
     // `igloo serve` runs the long-lived pgwire server; plain `igloo` runs
