@@ -1,6 +1,8 @@
 # Igloo Architecture
 
-Igloo is a single-crate, single-process proof-of-concept SQL query engine with an in-memory result cache. It uses Apache DataFusion for SQL execution over two registered tables — a Parquet-backed "iceberg" table and a custom `tokio-postgres`-backed `pg_table` provider with conservative filter pushdown — caches the pretty-printed result of one hardcoded demo query keyed by canonicalized SQL text, runs a separate ADBC FFI test query against PostgreSQL, and invalidates the whole cache when a file-based CDC listener finds any JSON event. The README's formerly aspirational claims (distributed, ADBC-through-DataFusion, Iceberg materialized views) were corrected in this branch to describe the actual state; Iceberg integration remains roadmap-only.
+Igloo is a single-crate, single-process proof-of-concept SQL query engine with an in-memory result cache. It uses Apache DataFusion for SQL execution over two registered tables — a Parquet-backed "iceberg" table and a custom `tokio-postgres`-backed `pg_table` provider with conservative filter pushdown — caches the Arrow record batches of executed queries keyed by canonicalized SQL text, runs a separate ADBC FFI test query against PostgreSQL (demo mode), and invalidates the whole cache when the file-based CDC listener finds any JSON event. The README's formerly aspirational claims (distributed, ADBC-through-DataFusion, Iceberg materialized views) were corrected in this branch to describe the actual state; Iceberg integration remains roadmap-only.
+
+> **Evolution note.** This document was written as a point-in-time analysis and is kept accurate for the core engine paths (`postgres_table`, `datafusion_engine`, `adbc_postgres`, `errors`, the CDC listener's semantics). Since then, `main` has grown beyond it (see `ROADMAP.md`): a lib/bin split (`src/lib.rs`), fail-fast TOML+env configuration (`src/config.rs` — no more silent defaults; new `IGLOO_CONFIG`, `IGLOO_LISTEN_ADDR`, `IGLOO_CACHE_MAX_ENTRIES`, `IGLOO_CACHE_TTL_SECONDS`, `IGLOO_CDC_POLL_SECONDS` vars), a pgwire server (`src/server.rs`, `igloo serve`) serving queries from the cache with a background CDC polling loop (`CdcListener::spawn_polling`), an Arrow-native bounded LRU+TTL thread-safe cache, integration test suites under `tests/`, and cargo-deny/coverage CI jobs. The `main.rs` wiring and the Configuration Surface table below are superseded by `config.rs` where they disagree; per-module sections carry inline notes where the newer design changes them.
 
 ## Directory Structure
 
@@ -8,37 +10,49 @@ Igloo is a single-crate, single-process proof-of-concept SQL query engine with a
 igloodb/
 ├── Cargo.toml               # crate manifest; pins arrow 53 / datafusion 44 / adbc_core 0.16
 ├── Cargo.lock
-├── README.md                # user-facing docs (partly aspirational; see discrepancies)
-├── CONTRIBUTING.md          # fmt + clippy workflow
+├── README.md                # user-facing docs
+├── ROADMAP.md               # phased feature roadmap with acceptance criteria
+├── CONTRIBUTING.md          # fmt + clippy workflow, testing policy
 ├── LICENSE                  # MIT
 ├── .env.example             # documents IGLOO_* / DATABASE_URL env vars
+├── deny.toml                # cargo-deny config (licenses + advisories, gated in CI)
+├── igloo.example.toml       # example config file (see src/config.rs)
 ├── Dockerfile               # multi-stage build (rust:1.87 -> debian:bookworm-slim)
 ├── docker-compose.yml       # postgres:15 + igloo services
 ├── .dockerignore
 ├── .gitignore
 ├── .github/workflows/
-│   ├── rust.yml             # CI: fmt, clippy -D warnings, docs, build, test (with live Postgres service)
+│   ├── rust.yml             # CI: build (fmt/clippy/docs/test), deny, coverage, integration (live Postgres)
 │   └── docs.yml             # GitHub Pages: rustdoc + this document
 ├── scripts/
-│   └── seed_test_db.sql     # single source of truth for integration-test data (CI + local)
+│   └── seed_test_db.sql     # seed fixture for the in-crate integration_* tests (CI + local)
 ├── dummy_iceberg_cdc/
 │   └── event1.json          # sole CDC event fixture; NO .parquet files ship here
 ├── docs/
 │   └── ARCHITECTURE.md      # this document
+├── tests/
+│   ├── postgres_federation.rs  # live-DB federated join test (env-gated)
+│   └── pgwire_server.rs        # pgwire server integration test
 └── src/
-    ├── main.rs              # entrypoint; wires cache, CDC, engine, ADBC; one demo query
+    ├── lib.rs               # library crate root exposing the modules below
+    ├── main.rs              # thin binary: config load, `igloo serve` or one demo query
+    ├── config.rs            # fail-fast configuration: TOML file + env overrides
+    ├── server.rs            # pgwire server serving queries from the cache
     ├── datafusion_engine.rs # SessionContext + table registration + query()
-    ├── postgres_table.rs    # custom DataFusion TableProvider over tokio-postgres
+    ├── postgres_table.rs    # custom TableProvider over tokio-postgres w/ filter pushdown
     ├── adbc_postgres.rs     # standalone ADBC FFI query path + batch printer
-    ├── cache_layer.rs       # in-memory HashMap<String,String> cache
-    ├── cdc_sync.rs          # directory-polling CDC listener -> whole-cache clear
+    ├── cache_layer.rs       # Arrow-native bounded LRU+TTL thread-safe cache
+    ├── cdc_sync.rs          # CDC listener: sync + background polling loop
     └── errors.rs            # IglooError enum + Result alias
 ```
 
 ## Module Inventory
 
 ### `src/main.rs` — application entrypoint
-Responsibility: process wiring and the single demo run. Declares all sibling modules (`src/main.rs:2-7`) and is `#[tokio::main]` (`src/main.rs:16`).
+> **Superseded in part** (see Evolution note): `main.rs` is now a thin binary over the `igloo` library — it loads fail-fast configuration via `config::Config` (TOML file + env overrides; missing required values abort startup instead of silently defaulting), dispatches `igloo serve` to the pgwire server (`server.rs`) with a background CDC polling loop, and otherwise runs the single demo query below, caching Arrow batches rather than display strings. The ADBC smoke test remains on the demo path's critical path.
+
+The original analysis of the demo flow (still the shape of the non-`serve` path):
+Responsibility: process wiring and the single demo run; `#[tokio::main]`.
 Public API: `async fn main() -> errors::Result<()>`.
 Key decisions:
 - Initializes `env_logger` with a default `info` filter, overridable by `RUST_LOG` (`src/main.rs:19`).
@@ -80,11 +94,13 @@ Collaboration: called once from `main` with `"SELECT 1 AS test_col"` (`src/main.
 Tests: 4 unit tests of `print_arrow_batch` (supported types incl. nulls, zero-row batch, Int64, Int16+Float32); `adbc_postgres_query_example` itself is untested (requires driver + DB).
 
 ### `src/cache_layer.rs` — in-memory result cache
-Responsibility: store query→result strings.
-Public API: `struct Cache` (`:8-11`); `new`, `get(&str) -> Option<&String>` (`:48`), `set(&str,&str)` (`:52`), `clear`, `len`, `is_empty`.
-Key decisions: a `HashMap<String,String>` keyed by a **canonicalized query string** produced by the private `cache_key` (`:31`): the query is parsed with sqlparser's `PostgreSqlDialect` (re-exported by DataFusion, no extra dependency) and the AST's `Display` form becomes the key, so whitespace, keyword casing, and trailing-semicolon variants share one entry; unparseable input falls back to the trimmed raw string. Unquoted identifier case is deliberately NOT folded — the failure mode is a spurious miss, never a wrong hit. Still no TTL or size bound. `clear` logs the eviction count.
-Collaboration: `main` reads/writes it; `CdcListener::sync` clears it.
-Tests: seven unit tests covering get-miss, set/get round-trip, overwrite, clear, formatting-equivalence hits, distinct literals, and the non-SQL fallback (`:77-141`).
+Responsibility: thread-safe, bounded, Arrow-native query-result cache (shared as `Arc<Cache>`).
+Public API: `pub fn normalize_query(&str) -> String` (`:30`); `struct Cache` with `new(max_entries, ttl)`, `with_clock` (injectable clock for TTL tests), `get(&str) -> Option<Arc<Vec<RecordBatch>>>`, `set(&str, Vec<RecordBatch>)`, `clear`, `len`, `is_empty`, and `stats() -> CacheStats` (hit/miss/eviction counters).
+Key decisions:
+- Values are the actual Arrow record batches, not display strings; entries expire after a TTL and the least-recently-used entry is evicted at capacity (O(n) scan, fine at configured scales).
+- Keys are **canonicalized query text** via `normalize_query` (`:30`): the primary path parses with sqlparser's `PostgreSqlDialect` (re-exported by DataFusion, no extra dependency) and uses the statements' `Display` form, so whitespace, keyword casing, and trailing-semicolon variants share one entry; input that does not parse as SQL falls back to a lexical normalizer (`normalize_lexical`, `:45`) that trims, drops one trailing `;`, and collapses whitespace outside quoted literals/identifiers. Unquoted identifier case is deliberately NOT folded — the failure mode is a spurious miss, never a wrong hit. Plan-based fingerprinting remains roadmap F1.4.
+Collaboration: demo `main` and the pgwire `server` read/write it; `CdcListener::sync` clears it.
+Tests: twelve unit tests covering normalization equivalence/non-equivalence pairs, escaped quotes, keyword-case folding, the non-SQL fallback, get/set/overwrite/clear behavior, LRU eviction, TTL expiry (clock-injected), and a concurrency smoke test.
 
 ### `src/cdc_sync.rs` — file-based CDC listener
 Responsibility: detect change events and conservatively invalidate the cache.
@@ -154,7 +170,9 @@ sequenceDiagram
 
 ## Configuration Surface
 
-Env vars actually read by code:
+> **Superseded** (see Evolution note): configuration is now owned by `src/config.rs` — an optional TOML file (path from `IGLOO_CONFIG`) with env-var overrides, and **fail-fast** semantics: `parquet_path`, `cdc_path`, and the Postgres URI are required (no hardcoded defaults). The same variable names below are still honored as env overrides, joined by `IGLOO_LISTEN_ADDR`, `IGLOO_CACHE_MAX_ENTRIES`, `IGLOO_CACHE_TTL_SECONDS`, and `IGLOO_CDC_POLL_SECONDS`. The `main.rs` line references below describe the pre-`config.rs` layout.
+
+Env vars read by the original demo wiring:
 
 | Variable | Default (in code) | Read at (`file:line`) |
 | --- | --- | --- |
@@ -196,7 +214,10 @@ A structural wrinkle: inside `PostgresTable::scan` the function signature is Dat
 
 | Module | Tests present | Coverage |
 | --- | --- | --- |
-| `cache_layer.rs` | 7 | get-miss, set/get, overwrite + `len`, `clear` + `is_empty`, formatting-equivalent keys hit one entry, distinct literals stay distinct, non-SQL trim fallback. |
+| `cache_layer.rs` | 12 | normalization equivalence/non-equivalence/escaped-quotes/keyword-case/non-SQL-fallback, get/set/overwrite/clear, LRU eviction, clock-injected TTL expiry, concurrency smoke. |
+| `config.rs` | (see file) | fail-fast validation and precedence tests added on `main`. |
+| `tests/postgres_federation.rs` | 1 (env-gated) | live federated Parquet ⋈ Postgres join end-to-end. |
+| `tests/pgwire_server.rs` | 2 | pgwire server round-trips against the cache. |
 | `cdc_sync.rs` | 4 (`:93-153`) | events-present invalidation, no-events retention, missing/remote dir, non-JSON ignored. Good coverage of `sync`/`read_local_events`. |
 | `datafusion_engine.rs` | 3 | Parquet `iceberg` registration + query with filter/projection, empty-parquet-directory (the shipped demo condition) yields zero rows, second-row projection. |
 | `postgres_table.rs` | 23 unit + 4 integration | `quote_ident`; `build_scan_sql` incl. WHERE/LIMIT/COUNT paths and quoting; the translation whitelist (all accepted operators, literal-on-left, escaping, IS NULL, AND/OR/NOT nesting) and seven rejection cases; integration (gated on `IGLOO_TEST_POSTGRES_URI`, seeded via `scripts/seed_test_db.sql`): pushed `=`, pushed `IS NULL`, unsupported text-ordering re-filtered above the scan, and filtered COUNT — all through a real DataFusion `SessionContext` against live PostgreSQL. |
@@ -214,21 +235,21 @@ Concrete coverage gaps (untested public/observable paths):
 
 | # | Item | Severity | Evidence |
 | --- | --- | --- | --- |
-| 1 | ~~Cache keyed by exact raw query string~~ **Resolved in this branch**: keys are canonicalized via a sqlparser parse round-trip. Residual: unquoted identifier case is not folded (spurious miss only) and keys remain text-based, not plan-based | Low (residual) | `src/cache_layer.rs:31` |
+| 1 | ~~Cache keyed by exact raw query string~~ **Resolved**: keys are canonicalized via a sqlparser parse round-trip with a lexical fallback (`normalize_query`). Residual: unquoted identifier case is not folded (spurious miss only) and keys remain text-based, not plan-based (roadmap F1.4) | Low (residual) | `src/cache_layer.rs:30` |
 | 2 | Any CDC event clears the entire cache — no per-table/per-key invalidation | Med | `src/cdc_sync.rs:42-52` |
 | 3 | Hardcoded Arrow schemas and physical table name; the requested Rust decode type is driven by the Arrow field, so any mismatch with live column types fails every scan | High | `src/datafusion_engine.rs:31-34`, `:53-58`; decode at `src/postgres_table.rs:141`, `:155-218` |
 | 4 | ~~No filter pushdown in `PostgresTable::scan`~~ **Resolved in this branch** (conservatively): translatable predicates are pushed as WHERE clauses and re-applied above the scan (`Inexact`). Residual: only whitelisted shapes push down — no floats/decimals/dates/timestamps, no string ordering, no LIKE/IN/casts — so queries outside the whitelist still fetch the full table | Low (residual) | `src/postgres_table.rs:164`, `:298-312`, `:331-334` |
 | 5 | Postgres connection uses `NoTls` — credentials and data travel in cleartext | Med | `src/postgres_table.rs:18`, `:256` |
 | 6 | `LIMIT` is appended with no `ORDER BY`; a pushed-down limit returns an arbitrary, nondeterministic row set (e.g. `SELECT * FROM pg_table LIMIT 5`) | Med | `src/postgres_table.rs:214` |
 | 7 | Two independent Postgres access paths (DataFusion via `tokio-postgres` vs ADBC FFI) with different drivers, auth handling, and type mapping; the ADBC path only runs `SELECT 1` and is unused by queries | Med | `src/postgres_table.rs:37-53` vs `src/adbc_postgres.rs:15-34`; both invoked from `src/main.rs:33`, `:50-51` |
-| 8 | Single hardcoded demo query; no query API, argument, or loop | Med | `src/main.rs:36` |
+| 8 | ~~No query API~~ **Partially resolved on `main`**: `igloo serve` exposes a pgwire server (`src/server.rs`); the non-`serve` demo path still runs one hardcoded query | Low (residual) | `src/main.rs`, `src/server.rs` |
 | 9 | CDC directory ships no `.parquet` files, so the `iceberg` scan returns zero rows and the demo join is always empty | Med | `dummy_iceberg_cdc/` holds only `event1.json`; schema at `src/datafusion_engine.rs:31-34` |
 | 10 | ADBC test query sits on the critical path (after `cache.set`, before `cdc.sync`); a missing driver `.so` or DB outage aborts the whole run so CDC sync never executes | Med | `src/adbc_postgres.rs:22-23`; ordering at `src/main.rs:51`, `:55` |
 | 11 | "Iceberg" is a plain Parquet `ListingTable` — no Iceberg manifests, snapshots, or materialized views exist | Med | `src/datafusion_engine.rs:29-49`; claims at `README.md:9-10`, `:41` |
-| 12 | Cache is unbounded — no TTL, size cap, or eviction beyond the wholesale CDC clear | Low | `src/cache_layer.rs:7-10` |
+| 12 | ~~Cache is unbounded~~ **Resolved on `main`**: bounded LRU with TTL expiry and eviction counters | — | `src/cache_layer.rs` (`Cache::new(max_entries, ttl)`) |
 | 13 | ~~`print_arrow_batch` lacks Int64/Float32/Int16 arms~~ **Resolved in this branch**. Residual: exotic Arrow types (e.g. decimals, nested) still print `[unsupported: ..]` via the catch-all | Low (residual) | `src/adbc_postgres.rs:90`, `:106`, `:114` |
 | 14 | CDC event bodies are read as opaque strings and only logged; content (table, keys, op) is never parsed | Low | `src/cdc_sync.rs:57-77` |
-| 15 | No metrics/instrumentation — only `log`; no counters or timings for cache hit rate, scan latency, etc. | Low | dependencies in `Cargo.toml:11-24` (no metrics crate); roadmap `README.md:212` |
+| 15 | Metrics: the cache now tracks hit/miss/eviction counters (`CacheStats`), but nothing exports them and no timings exist for scan latency etc. — no Prometheus/OTel integration | Low | `src/cache_layer.rs` (`CacheStats`); roadmap |
 | 16 | `TEST_ADBC_POSTGRESQL_URI` documented but never read; `LD_LIBRARY_PATH` documented as config but is an OS-loader variable | Low | `README.md:180-197`; not present in `src/` |
 | 17 | Declared MSRV `rust-version = "1.80.1"` is not satisfiable with the committed lockfile: the locked transitive dependency `ar_archive_writer 0.5.2` requires the `edition2024` Cargo feature (Cargo ≥ 1.85), so `cargo +1.80.1 check --all-targets --locked` fails while parsing the dependency graph. Either the MSRV must be raised or the offending dependencies pinned lower. | Med | `Cargo.toml:5`; `Cargo.lock` (`ar_archive_writer 0.5.2`); verified empirically with a local 1.80.1 toolchain |
 
