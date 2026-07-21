@@ -101,6 +101,8 @@ For data-engineering clients (Python/pandas/Polars, JDBC Flight SQL driver), ser
 
 Kill the hardcoded schemas. Sources are declared in config (and later via SQL `CREATE EXTERNAL TABLE` / catalog API); Igloo introspects `information_schema` to discover tables and column types, mapping Postgres types to Arrow types automatically.
 
+> **Status:** first slice landed (`src/catalog.rs`): every base table in the configured `postgres_schemas` (default `public`) is discovered via `information_schema` and registered automatically with PG→Arrow type mapping (10 types); unsupported columns degrade to a logged supported-subset registration; cross-schema name collisions get a deterministic `schema__table` fallback; `SHOW TABLES` works via DataFusion's information schema; scan SQL is schema-qualified. Still open below: multi-source config (one Postgres source today), the full type-coverage list (uuid/json/numeric map to nothing yet), and schema-drift error handling.
+
 **Acceptance criteria**
 - [ ] Adding a Postgres source in `igloo.toml` (name + URI + optional schema/table allowlist) makes all its tables queryable by `<source>.<schema>.<table>` name with no Rust code changes.
 - [ ] Type-mapping table covers at minimum: all int/float/numeric widths, text/varchar, bool, bytea, date, timestamp/timestamptz, uuid, json/jsonb (as Utf8 initially); unsupported types degrade to an explicit per-column error at registration, not a runtime panic.
