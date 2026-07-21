@@ -27,7 +27,12 @@ async fn main() -> Result<()> {
     let cdc = CdcListener::new(&config.cdc_path);
 
     log::info!("Initializing DataFusionEngine...");
-    let engine = DataFusionEngine::new(&config.parquet_path, config.postgres_uri.expose()).await?;
+    let engine = DataFusionEngine::new(
+        &config.parquet_path,
+        config.postgres_uri.expose(),
+        &config.postgres_schemas,
+    )
+    .await?;
     log::info!("DataFusionEngine initialized successfully.");
 
     let query = "SELECT i.user_id, i.data, p.extra_info FROM iceberg i JOIN pg_table p ON i.user_id = p.user_id WHERE i.user_id = 42";
@@ -71,8 +76,14 @@ async fn serve(config: config::Config) -> Result<()> {
         }
     };
     log::info!("Initializing DataFusionEngine for serve mode...");
-    let engine =
-        Arc::new(DataFusionEngine::new(&config.parquet_path, config.postgres_uri.expose()).await?);
+    let engine = Arc::new(
+        DataFusionEngine::new(
+            &config.parquet_path,
+            config.postgres_uri.expose(),
+            &config.postgres_schemas,
+        )
+        .await?,
+    );
 
     let cache = Arc::new(Cache::new(config.cache_max_entries, config.cache_ttl));
     let cdc = Arc::new(CdcListener::new(&config.cdc_path));

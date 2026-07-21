@@ -22,6 +22,12 @@ cdc_path = "./dummy_iceberg_cdc"
 # committing credentials to a file.
 postgres_uri = "postgres://postgres:postgres@localhost:5432/mydb"
 
+# PostgreSQL schemas (namespaces) to introspect. Every base table found in
+# these schemas is registered automatically (views are skipped). Optional;
+# defaults to ["public"]. Must list at least one schema. Env override:
+# IGLOO_POSTGRES_SCHEMAS as a comma-separated list (e.g. "public,analytics").
+# postgres_schemas = ["public"]
+
 # Address for the pgwire server started by `igloo serve` (env override:
 # IGLOO_LISTEN_ADDR). Optional — only required in serve mode. The endpoint
 # is currently UNAUTHENTICATED plaintext; keep it on localhost or a

@@ -84,7 +84,7 @@ async fn pgwire_client_queries_and_survives_errors() {
         .unwrap();
 
     let engine = Arc::new(
-        DataFusionEngine::new(dir.to_str().unwrap(), &uri)
+        DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
             .await
             .expect("engine init failed"),
     );
@@ -167,7 +167,7 @@ async fn cdc_event_refreshes_cached_pgwire_results() {
         .unwrap();
 
     let engine = Arc::new(
-        DataFusionEngine::new(parquet_dir.to_str().unwrap(), &uri)
+        DataFusionEngine::new(parquet_dir.to_str().unwrap(), &uri, &["public".to_string()])
             .await
             .unwrap(),
     );

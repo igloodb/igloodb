@@ -198,6 +198,10 @@ Igloo's behavior is controlled by a small set of required settings. They can com
     *   **Example (local):** `./dummy_iceberg_cdc`
     *   **Example (Docker):** `/app/dummy_iceberg_cdc` (path inside the Igloo container)
 
+*   `IGLOO_POSTGRES_SCHEMAS`:
+    *   **Purpose:** Comma-separated list of PostgreSQL schemas (namespaces) to introspect. Every base table found in these schemas is registered automatically by name (views are skipped); columns whose type has no Arrow mapping are dropped with a warning (config file key: `postgres_schemas`, a TOML array). Optional — defaults to `public`. Must list at least one schema.
+    *   **Example:** `public,analytics`
+
 *   `IGLOO_CONFIG`:
     *   **Purpose:** Optional path to a TOML config file providing the settings above (see `igloo.example.toml`). Environment variables override file values. If unset, `./igloo.toml` is used when present.
 

@@ -23,24 +23,40 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Quote a (schema, table) pair into a schema-qualified relation reference,
+/// e.g. `"public"."my_table"`. Qualifying is what lets scans resolve tables
+/// that live outside the connection's default `search_path`. Each identifier
+/// is quoted and escaped independently.
+fn quote_relation(schema_name: &str, table_name: &str) -> String {
+    format!("{}.{}", quote_ident(schema_name), quote_ident(table_name))
+}
+
 /// Build the SQL that [`PostgresTable::scan`] runs against PostgreSQL for a
 /// given projection.
+///
+/// The table is referenced schema-qualified (`"schema"."table"`) so it
+/// resolves regardless of the connection's `search_path`.
 ///
 /// When `projected_fields` is empty (e.g. `SELECT COUNT(*)`), this produces a
 /// row-count query; otherwise it selects the projected columns explicitly, in
 /// projected-schema order, so result column positions line up with the Arrow
 /// schema. This is pure string construction with no client/session
 /// dependency, kept as the single source of truth for the scan SQL.
-fn build_scan_sql(table_name: &str, projected_fields: &Fields, limit: Option<usize>) -> String {
+fn build_scan_sql(
+    schema_name: &str,
+    table_name: &str,
+    projected_fields: &Fields,
+    limit: Option<usize>,
+) -> String {
     let limit_clause = limit.map(|n| format!(" LIMIT {}", n)).unwrap_or_default();
+    let relation = quote_relation(schema_name, table_name);
 
     // A projection can be empty (e.g. `SELECT COUNT(*)`), in which case
     // DataFusion only needs the row count, not any column data.
     if projected_fields.is_empty() {
         format!(
             "SELECT COUNT(*) FROM (SELECT 1 FROM {}{}) AS t",
-            quote_ident(table_name),
-            limit_clause
+            relation, limit_clause
         )
     } else {
         // Select the projected columns explicitly, in projected-schema order,
@@ -53,9 +69,7 @@ fn build_scan_sql(table_name: &str, projected_fields: &Fields, limit: Option<usi
 
         format!(
             "SELECT {} FROM {}{}",
-            sql_select_cols,
-            quote_ident(table_name),
-            limit_clause
+            sql_select_cols, relation, limit_clause
         )
     }
 }
@@ -64,6 +78,7 @@ fn build_scan_sql(table_name: &str, projected_fields: &Fields, limit: Option<usi
 #[derive(Debug, Clone)]
 pub struct PostgresTable {
     client: Arc<Client>,
+    schema_name: String,
     table_name: String,
     schema: SchemaRef,
 }
@@ -71,7 +86,15 @@ pub struct PostgresTable {
 impl PostgresTable {
     // Connects to PostgreSQL and keeps the client for later scans. The
     // connection task is driven in the background for the client's lifetime.
-    pub async fn try_new(conn_str: &str, table_name: &str, schema: SchemaRef) -> IglooResult<Self> {
+    // `schema_name` is the PostgreSQL schema (namespace) the table lives in,
+    // e.g. `public`; scans are schema-qualified with it so tables outside the
+    // connection's default `search_path` still resolve.
+    pub async fn try_new(
+        conn_str: &str,
+        schema_name: &str,
+        table_name: &str,
+        schema: SchemaRef,
+    ) -> IglooResult<Self> {
         let (client, connection) = tokio_postgres::connect(conn_str, NoTls)
             .await
             .map_err(IglooError::Postgres)?;
@@ -84,9 +107,27 @@ impl PostgresTable {
 
         Ok(Self {
             client: Arc::new(client),
+            schema_name: schema_name.to_string(),
             table_name: table_name.to_string(),
             schema,
         })
+    }
+
+    /// Builds a [`PostgresTable`] from an already-connected client. Lets
+    /// callers (e.g. catalog registration) share one connection across many
+    /// tables instead of opening one per table.
+    pub fn from_client(
+        client: Arc<Client>,
+        schema_name: &str,
+        table_name: &str,
+        schema: SchemaRef,
+    ) -> Self {
+        Self {
+            client,
+            schema_name: schema_name.to_string(),
+            table_name: table_name.to_string(),
+            schema,
+        }
     }
 }
 
@@ -116,7 +157,12 @@ impl TableProvider for PostgresTable {
             None => self.schema.clone(),
         };
 
-        let query = build_scan_sql(&self.table_name, projected_schema.fields(), limit);
+        let query = build_scan_sql(
+            &self.schema_name,
+            &self.table_name,
+            projected_schema.fields(),
+            limit,
+        );
 
         // A projection can be empty (e.g. `SELECT COUNT(*)`), in which case
         // DataFusion only needs the row count, not any column data.
@@ -275,52 +321,62 @@ mod tests {
     #[test]
     fn build_scan_sql_projection_no_limit() {
         let sql = build_scan_sql(
+            "public",
             "my_pg_table",
             &fields_from(&["user_id", "extra_info"]),
             None,
         );
         assert_eq!(
             sql,
-            "SELECT \"user_id\", \"extra_info\" FROM \"my_pg_table\""
+            "SELECT \"user_id\", \"extra_info\" FROM \"public\".\"my_pg_table\""
         );
     }
 
     #[test]
     fn build_scan_sql_projection_with_limit() {
         let sql = build_scan_sql(
+            "public",
             "my_pg_table",
             &fields_from(&["user_id", "extra_info"]),
             Some(5),
         );
         assert_eq!(
             sql,
-            "SELECT \"user_id\", \"extra_info\" FROM \"my_pg_table\" LIMIT 5"
+            "SELECT \"user_id\", \"extra_info\" FROM \"public\".\"my_pg_table\" LIMIT 5"
         );
     }
 
     #[test]
     fn build_scan_sql_empty_projection_with_limit() {
-        let sql = build_scan_sql("my_pg_table", &fields_from(&[]), Some(5));
+        let sql = build_scan_sql("public", "my_pg_table", &fields_from(&[]), Some(5));
         assert_eq!(
             sql,
-            "SELECT COUNT(*) FROM (SELECT 1 FROM \"my_pg_table\" LIMIT 5) AS t"
+            "SELECT COUNT(*) FROM (SELECT 1 FROM \"public\".\"my_pg_table\" LIMIT 5) AS t"
         );
     }
 
     #[test]
     fn build_scan_sql_empty_projection_no_limit() {
-        let sql = build_scan_sql("my_pg_table", &fields_from(&[]), None);
+        let sql = build_scan_sql("public", "my_pg_table", &fields_from(&[]), None);
         assert_eq!(
             sql,
-            "SELECT COUNT(*) FROM (SELECT 1 FROM \"my_pg_table\") AS t"
+            "SELECT COUNT(*) FROM (SELECT 1 FROM \"public\".\"my_pg_table\") AS t"
         );
     }
 
     #[test]
+    fn build_scan_sql_qualifies_non_default_schema() {
+        // A table in a non-default schema resolves because the relation is
+        // schema-qualified.
+        let sql = build_scan_sql("analytics", "events", &fields_from(&["id"]), None);
+        assert_eq!(sql, "SELECT \"id\" FROM \"analytics\".\"events\"");
+    }
+
+    #[test]
     fn build_scan_sql_escapes_embedded_quotes() {
-        // Both the table name and the column name contain a double quote, which
-        // `quote_ident` doubles when escaping.
-        let sql = build_scan_sql("we\"ird", &fields_from(&["c\"ol"]), None);
-        assert_eq!(sql, "SELECT \"c\"\"ol\" FROM \"we\"\"ird\"");
+        // The schema, table and column names each contain a double quote,
+        // which `quote_ident` doubles when escaping — independently per part.
+        let sql = build_scan_sql("sch\"ema", "we\"ird", &fields_from(&["c\"ol"]), None);
+        assert_eq!(sql, "SELECT \"c\"\"ol\" FROM \"sch\"\"ema\".\"we\"\"ird\"");
     }
 }
