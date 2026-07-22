@@ -171,6 +171,10 @@ IGLOO_TEST_POSTGRES_URI=postgres://postgres:postgres@localhost:5432/igloo_test \
     cargo test --test postgres_federation
 ```
 
+### Filter pushdown to PostgreSQL
+
+Simple `WHERE` predicates are translated to SQL and pushed down to PostgreSQL so a selective query fetches only matching rows instead of the whole table (see `src/pushdown.rs` for the supported grammar: comparisons, `IS NULL`/`IS NOT NULL`, `IN`/`NOT IN`, and `AND`, over int/float/bool/text literals). Every pushed filter is classified `Inexact` — DataFusion re-applies it locally — so results are always correct even when a predicate is only partially or not pushed; unsupported predicates simply run locally. String literals are escaped (single quotes doubled, NUL rejected) so predicate values can never alter the generated SQL. Each `PostgresTable` exposes a `rows_fetched()` counter proving the reduction, and pushdown can be disabled per engine via `DataFusionEngine::new_with_pushdown(.., false)` (used by the differential tests in `tests/pushdown.rs` to confirm pushed and unpushed queries return identical results).
+
 ## 🛠️ Environment Variable Reference
 
 Igloo's behavior is controlled by a small set of required settings. They can come from a TOML config file (`igloo.toml` in the working directory, or any path via `IGLOO_CONFIG` — see `igloo.example.toml`) and/or environment variables, with **environment variables taking precedence**. When running locally, environment variables can be set in a `.env` file (by copying `.env.example`) or directly in your shell. When using Docker Compose, these are set within the `docker-compose.yml` file for the `igloo` service.
