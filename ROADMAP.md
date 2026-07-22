@@ -183,7 +183,9 @@ Replace the Parquet `ListingTable` masquerading as "iceberg" with real Iceberg s
 
 ### F3.1 Filter and aggregate pushdown to sources
 
-Projection and `LIMIT` are already pushed down to Postgres (`src/postgres_table.rs:75-90`), but every filtered query still fetches all rows and filters locally. Implement `TableProvider::supports_filters_pushdown`, translating DataFusion `Expr`s to source SQL (safely — parameterized/quoted, never string-concatenated user values), and push simple aggregates.
+Projection and `LIMIT` are already pushed down to Postgres, but until recently every filtered query still fetched all rows and filtered locally. Implement `TableProvider::supports_filters_pushdown`, translating DataFusion `Expr`s to source SQL (safely — parameterized/quoted, never string-concatenated user values), and push simple aggregates.
+
+> **Status:** filter pushdown landed (`src/pushdown.rs`): comparisons, `IS [NOT] NULL`, `IN`/`NOT IN`, and `AND` over int/float/bool/text literals translate to upstream `WHERE` clauses, classified **Inexact** so DataFusion re-applies them locally and correctness never depends on translation. String literals are escape-tested against hostile inputs; a conservative rule prevents the unsound WHERE+LIMIT combination; a `rows_fetched` counter proves the reduction (5 vs 1000 rows on the selective-query integration test) and a 15-query differential corpus asserts pushed == unpushed results. Still open: date/timestamp/decimal literals, `OR`/`LIKE`/`BETWEEN`, aggregate pushdown, and `EXPLAIN` surfacing of what was pushed.
 
 **Acceptance criteria**
 - [ ] `SELECT c1 FROM t WHERE c2 > $x LIMIT 10` against a 10M-row upstream table transfers only rows matching the predicate (bounded by LIMIT), verified by upstream query inspection in an integration test; wall-clock improves ≥ 10x vs. the pre-pushdown baseline on the documented benchmark.

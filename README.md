@@ -130,6 +130,7 @@ async fn main() -> igloo::errors::Result<()> {
     let engine = DataFusionEngine::new(
         "./dummy_iceberg_cdc/",
         "postgres://postgres:postgres@localhost:5432/mydb",
+        &["public".to_string()],
     )
     .await?;
 
