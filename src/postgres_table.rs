@@ -694,7 +694,8 @@ mod tests {
             let uri = pg_uri_or_skip!("integration_filter_user_id_eq");
             // `user_id = 42` is pushed down as an exact SQL predicate.
             let batches =
-                scan_via_datafusion(&uri, "SELECT extra_info FROM pg_table WHERE user_id = 42").await;
+                scan_via_datafusion(&uri, "SELECT extra_info FROM pg_table WHERE user_id = 42")
+                    .await;
             assert_eq!(
                 collect_str(&batches, 0),
                 vec![Some("answer to everything".to_string())]

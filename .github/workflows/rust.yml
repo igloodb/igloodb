@@ -91,5 +91,6 @@ jobs:
         cargo test --lib integration_ -- --nocapture
         cargo test --test postgres_federation -- --nocapture
         cargo test --test catalog -- --nocapture
+        cargo test --test pushdown -- --nocapture
       env:
         IGLOO_TEST_POSTGRES_URI: postgres://postgres:postgres@localhost:5432/igloo_test

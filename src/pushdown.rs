@@ -39,10 +39,18 @@
 //!              | column IS NOT NULL
 //!              | column [NOT] IN (literal, ...)
 //!              | predicate AND predicate
-//! cmp         := = | <> | < | <= | > | >=
+//! cmp         := = | <>                      (any supported literal)
+//!              | < | <= | > | >=             (non-string literals only)
 //! literal     := bool | intN | floatN(finite) | utf8(no NUL)
 //! column      := a name present in the table's Arrow schema
 //! ```
+//!
+//! String ORDERING comparisons are deliberately excluded: PostgreSQL orders
+//! text by collation while Arrow compares bytes, and the two disagree in both
+//! directions, so a pushed string ordering can return *less* than a superset
+//! of the matching rows — breaking the `Inexact` model above (see
+//! [`is_string_literal`]). String equality/`IN` remain pushable under
+//! PostgreSQL's default deterministic collations.
 //!
 //! Everything else (`OR`, `LIKE`, `BETWEEN`, `CAST`, function calls, dates,
 //! timestamps, decimals, `NULL` literals, subqueries, nested non-column/literal
@@ -106,18 +114,51 @@ fn translate_comparison(
     let sql_op = comparison_op_sql(op)?;
     // column <op> literal
     if let (Some(col), Some(lit)) = (as_column(left), as_literal(right)) {
+        if is_ordering(op) && is_string_literal(lit) {
+            return None;
+        }
         let col = column_sql(col, schema)?;
         let lit = literal_sql(lit)?;
         return Some(format!("{} {} {}", col, sql_op, lit));
     }
     // literal <op> column  → flip the operator so the column stays on the left
     if let (Some(lit), Some(col)) = (as_literal(left), as_column(right)) {
+        if is_ordering(op) && is_string_literal(lit) {
+            return None;
+        }
         let flipped = comparison_op_sql(flip_operator(op))?;
         let col = column_sql(col, schema)?;
         let lit = literal_sql(lit)?;
         return Some(format!("{} {} {}", col, flipped, lit));
     }
     None
+}
+
+/// Whether `op` is an ordering comparison (`<`, `<=`, `>`, `>=`).
+fn is_ordering(op: Operator) -> bool {
+    matches!(
+        op,
+        Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
+    )
+}
+
+/// Whether the literal is a string. String ORDERING comparisons must not be
+/// pushed down: PostgreSQL orders text by the column's collation (commonly
+/// `en_US.UTF-8`-style dictionary order), while DataFusion/Arrow compares
+/// bytes — and the two disagree in BOTH directions (e.g. `'B' < 'a'` byte-wise
+/// but `'B' > 'a'` under dictionary collations). A pushed string ordering can
+/// therefore UNDER-fetch, returning less than the superset of matching rows
+/// that the `Inexact` re-filter model requires — the local re-filter cannot
+/// resurrect rows the source never returned. String EQUALITY (`=`, `<>`, `IN`)
+/// stays pushable: under PostgreSQL's default deterministic collations, text
+/// equality is byte equality, matching Arrow exactly.
+fn is_string_literal(v: &ScalarValue) -> bool {
+    matches!(
+        v,
+        ScalarValue::Utf8(Some(_))
+            | ScalarValue::LargeUtf8(Some(_))
+            | ScalarValue::Utf8View(Some(_))
+    )
 }
 
 /// Translate `column [NOT] IN (literal, ...)`. Requires a non-empty list of
@@ -284,6 +325,34 @@ mod tests {
         assert_eq!(
             t(col("id").gt_eq(lit(1i64))).as_deref(),
             Some("\"id\" >= 1")
+        );
+    }
+
+    #[test]
+    fn string_ordering_is_rejected() {
+        // Collation order (PostgreSQL) and byte order (Arrow) disagree in both
+        // directions, so a pushed string ordering could under-fetch. Must not
+        // translate — in either operand order.
+        assert_eq!(t(col("name").gt(lit("a"))), None);
+        assert_eq!(t(col("name").lt(lit("a"))), None);
+        assert_eq!(t(col("name").gt_eq(lit("a"))), None);
+        assert_eq!(t(col("name").lt_eq(lit("a"))), None);
+        assert_eq!(
+            t(binary_expr(lit("a"), Operator::Lt, col("name"))),
+            None,
+            "flipped operand order must be rejected too"
+        );
+    }
+
+    #[test]
+    fn string_equality_still_pushed() {
+        assert_eq!(
+            t(col("name").eq(lit("a"))).as_deref(),
+            Some("\"name\" = 'a'")
+        );
+        assert_eq!(
+            t(col("name").not_eq(lit("a"))).as_deref(),
+            Some("\"name\" <> 'a'")
         );
     }
 
