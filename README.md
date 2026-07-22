@@ -130,6 +130,7 @@ async fn main() -> igloo::errors::Result<()> {
     let engine = DataFusionEngine::new(
         "./dummy_iceberg_cdc/",
         "postgres://postgres:postgres@localhost:5432/mydb",
+        &["public".to_string()],
     )
     .await?;
 
@@ -170,6 +171,10 @@ Integration tests exercise the federated Parquet ⋈ PostgreSQL path against a l
 IGLOO_TEST_POSTGRES_URI=postgres://postgres:postgres@localhost:5432/igloo_test \
     cargo test --test postgres_federation
 ```
+
+### Filter pushdown to PostgreSQL
+
+Simple `WHERE` predicates are translated to SQL and pushed down to PostgreSQL so a selective query fetches only matching rows instead of the whole table (see `src/pushdown.rs` for the supported grammar: comparisons, `IS NULL`/`IS NOT NULL`, `IN`/`NOT IN`, and `AND`, over int/float/bool/text literals). Every pushed filter is classified `Inexact` — DataFusion re-applies it locally — so results are always correct even when a predicate is only partially or not pushed; unsupported predicates simply run locally. String literals are escaped (single quotes doubled, NUL rejected) so predicate values can never alter the generated SQL. Each `PostgresTable` exposes a `rows_fetched()` counter proving the reduction, and pushdown can be disabled per engine via `DataFusionEngine::new_with_pushdown(.., false)` (used by the differential tests in `tests/pushdown.rs` to confirm pushed and unpushed queries return identical results).
 
 ## 🛠️ Environment Variable Reference
 
