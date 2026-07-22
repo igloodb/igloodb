@@ -12,4 +12,5 @@ pub mod crypto_metrics;
 pub mod datafusion_engine;
 pub mod errors;
 pub mod postgres_table;
+pub mod pushdown;
 pub mod server;

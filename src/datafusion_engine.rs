@@ -29,18 +29,33 @@ pub struct DataFusionEngine {
 impl DataFusionEngine {
     /// Builds the engine, registering the Parquet-backed `iceberg` table and
     /// every PostgreSQL base table discovered in `postgres_schemas` (default
-    /// `["public"]`).
+    /// `["public"]`). Filter pushdown to PostgreSQL is enabled.
     pub async fn new(
         parquet_path: &str,
         postgres_conn_str: &str,
         postgres_schemas: &[String],
+    ) -> Result<Self> {
+        Self::new_with_pushdown(parquet_path, postgres_conn_str, postgres_schemas, true).await
+    }
+
+    /// Like [`Self::new`] but lets the caller disable filter pushdown on the
+    /// registered PostgreSQL tables. With `filter_pushdown = false`, every
+    /// predicate is applied by DataFusion locally rather than translated to a
+    /// SQL `WHERE`. This exists so tests can differentially compare pushed vs.
+    /// unpushed execution and assert identical results.
+    pub async fn new_with_pushdown(
+        parquet_path: &str,
+        postgres_conn_str: &str,
+        postgres_schemas: &[String],
+        filter_pushdown: bool,
     ) -> Result<Self> {
         // Enable DataFusion's information_schema so BI tools (and tests) can
         // run `SHOW TABLES` / query `information_schema` against Igloo.
         let ctx =
             SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
         Self::register_iceberg_table(&ctx, parquet_path)?;
-        Self::register_postgres_tables(&ctx, postgres_conn_str, postgres_schemas).await?;
+        Self::register_postgres_tables(&ctx, postgres_conn_str, postgres_schemas, filter_pushdown)
+            .await?;
         log::info!("DataFusion context initialized with Iceberg and Postgres tables.");
         Ok(Self { ctx })
     }
@@ -82,6 +97,7 @@ impl DataFusionEngine {
         ctx: &SessionContext,
         postgres_conn_str: &str,
         schemas: &[String],
+        filter_pushdown: bool,
     ) -> Result<()> {
         // One shared connection drives introspection and every table's scans.
         let (client, connection) = tokio_postgres::connect(postgres_conn_str, NoTls)
@@ -107,12 +123,15 @@ impl DataFusionEngine {
         let mut legacy_registered = false;
         for (reg_name, table) in catalog::resolve_registration_names(&tables) {
             let arrow_schema = Arc::new(ArrowSchema::new(table.fields.clone()));
-            let provider = Arc::new(PostgresTable::from_client(
-                client.clone(),
-                &table.schema,
-                &table.name,
-                arrow_schema.clone(),
-            ));
+            let provider = Arc::new(
+                PostgresTable::from_client(
+                    client.clone(),
+                    &table.schema,
+                    &table.name,
+                    arrow_schema.clone(),
+                )
+                .with_filter_pushdown(filter_pushdown),
+            );
             ctx.register_table(reg_name.as_str(), provider)?;
             log::info!(
                 "registered Postgres table {}.{} as {:?} ({} column(s))",
@@ -124,12 +143,15 @@ impl DataFusionEngine {
 
             // Backward compatibility: expose my_pg_table under `pg_table` too.
             if !legacy_registered && table.name == LEGACY_SOURCE_TABLE {
-                let alias_provider = Arc::new(PostgresTable::from_client(
-                    client.clone(),
-                    &table.schema,
-                    &table.name,
-                    arrow_schema,
-                ));
+                let alias_provider = Arc::new(
+                    PostgresTable::from_client(
+                        client.clone(),
+                        &table.schema,
+                        &table.name,
+                        arrow_schema,
+                    )
+                    .with_filter_pushdown(filter_pushdown),
+                );
                 ctx.register_table(LEGACY_ALIAS, alias_provider)?;
                 legacy_registered = true;
                 log::info!(
