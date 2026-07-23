@@ -25,7 +25,7 @@ use datafusion::sql::sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
 /// mode is a spurious miss (re-execution), never a wrong hit.
 ///
 /// Fallback: input sqlparser cannot parse (pgwire clients may send
-/// anything) is normalized lexically by [`normalize_lexical`] so non-SQL
+/// anything) is normalized lexically by `normalize_lexical` so non-SQL
 /// keys still cache consistently.
 pub fn normalize_query(sql: &str) -> String {
     match Parser::parse_sql(&PostgreSqlDialect {}, sql) {

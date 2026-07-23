@@ -49,7 +49,7 @@
 //! text by collation while Arrow compares bytes, and the two disagree in both
 //! directions, so a pushed string ordering can return *less* than a superset
 //! of the matching rows — breaking the `Inexact` model above (see
-//! [`is_string_literal`]). String equality/`IN` remain pushable under
+//! `is_string_literal`). String equality/`IN` remain pushable under
 //! PostgreSQL's default deterministic collations.
 //!
 //! Everything else (`OR`, `LIKE`, `BETWEEN`, `CAST`, function calls, dates,
