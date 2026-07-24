@@ -596,4 +596,146 @@ mod tests {
         assert_eq!(pushed_limit(Some(10), 1, 2), None);
         assert_eq!(pushed_limit(Some(10), 0, 1), None);
     }
+
+    /// Live-database integration tests through a real DataFusion
+    /// `SessionContext` against the seeded `my_pg_table` fixture
+    /// (`scripts/seed_test_db.sql`): (42, 'answer to everything'),
+    /// (7, 'lucky number'), (100, NULL). Each test reads
+    /// `IGLOO_TEST_POSTGRES_URI` and skips when unset, keeping plain
+    /// `cargo test` hermetic; the CI integration job runs them.
+    mod live {
+        use crate::postgres_table::PostgresTable;
+        use arrow::array::{Array, Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+        use arrow::record_batch::RecordBatch;
+        use datafusion::prelude::SessionContext;
+        use std::sync::Arc;
+
+        /// The `my_pg_table` schema: `user_id BIGINT NOT NULL`, `extra_info TEXT`.
+        fn test_schema() -> SchemaRef {
+            Arc::new(Schema::new(vec![
+                Field::new("user_id", DataType::Int64, false),
+                Field::new("extra_info", DataType::Utf8, true),
+            ]))
+        }
+
+        /// Read the integration-test database URI, or skip the calling test.
+        macro_rules! pg_uri_or_skip {
+            ($name:literal) => {
+                match std::env::var("IGLOO_TEST_POSTGRES_URI") {
+                    Ok(uri) => uri,
+                    Err(_) => {
+                        eprintln!("skipping {}: IGLOO_TEST_POSTGRES_URI not set", $name);
+                        return;
+                    }
+                }
+            };
+        }
+
+        /// Register `my_pg_table` as `pg_table` in a fresh `SessionContext` and run
+        /// `sql`, returning the collected result batches.
+        async fn scan_via_datafusion(uri: &str, sql: &str) -> Vec<RecordBatch> {
+            let provider = PostgresTable::try_new(uri, "public", "my_pg_table", test_schema())
+                .await
+                .expect("connect to PostgreSQL");
+            let ctx = SessionContext::new();
+            ctx.register_table("pg_table", Arc::new(provider))
+                .expect("register pg_table");
+            ctx.sql(sql)
+                .await
+                .expect("plan sql")
+                .collect()
+                .await
+                .expect("collect results")
+        }
+
+        /// Flatten an `Int64` column across all batches into nullable values.
+        fn collect_i64(batches: &[RecordBatch], col_idx: usize) -> Vec<Option<i64>> {
+            let mut out = Vec::new();
+            for batch in batches {
+                let array = batch
+                    .column(col_idx)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("Int64 column");
+                for i in 0..array.len() {
+                    if array.is_null(i) {
+                        out.push(None);
+                    } else {
+                        out.push(Some(array.value(i)));
+                    }
+                }
+            }
+            out
+        }
+
+        /// Flatten a `Utf8` column across all batches into nullable owned strings.
+        fn collect_str(batches: &[RecordBatch], col_idx: usize) -> Vec<Option<String>> {
+            let mut out = Vec::new();
+            for batch in batches {
+                let array = batch
+                    .column(col_idx)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("Utf8 column");
+                for i in 0..array.len() {
+                    if array.is_null(i) {
+                        out.push(None);
+                    } else {
+                        out.push(Some(array.value(i).to_string()));
+                    }
+                }
+            }
+            out
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn integration_filter_user_id_eq() {
+            let uri = pg_uri_or_skip!("integration_filter_user_id_eq");
+            // `user_id = 42` is pushed down as an exact SQL predicate.
+            let batches =
+                scan_via_datafusion(&uri, "SELECT extra_info FROM pg_table WHERE user_id = 42")
+                    .await;
+            assert_eq!(
+                collect_str(&batches, 0),
+                vec![Some("answer to everything".to_string())]
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn integration_filter_is_null() {
+            let uri = pg_uri_or_skip!("integration_filter_is_null");
+            // `extra_info IS NULL` is pushed down; only user_id 100 has a NULL.
+            let batches = scan_via_datafusion(
+                &uri,
+                "SELECT user_id FROM pg_table WHERE extra_info IS NULL",
+            )
+            .await;
+            assert_eq!(collect_i64(&batches, 0), vec![Some(100)]);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn integration_text_ordering_refiltered_above_scan() {
+            let uri = pg_uri_or_skip!("integration_text_ordering_refiltered_above_scan");
+            // `extra_info > 'a'` is NOT pushed down (string ordering is unsupported),
+            // so DataFusion re-applies it above the scan. Results must still be
+            // correct: 'answer to everything' and 'lucky number' match, NULL does
+            // not, so user_ids 7 and 42 remain (100 is excluded).
+            let batches = scan_via_datafusion(
+                &uri,
+                "SELECT user_id FROM pg_table WHERE extra_info > 'a' ORDER BY user_id",
+            )
+            .await;
+            assert_eq!(collect_i64(&batches, 0), vec![Some(7), Some(42)]);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn integration_count_with_filter() {
+            let uri = pg_uri_or_skip!("integration_count_with_filter");
+            // `user_id > 7` matches 42 and 100 -> COUNT(*) = 2.
+            let batches =
+                scan_via_datafusion(&uri, "SELECT COUNT(*) FROM pg_table WHERE user_id > 7").await;
+            assert_eq!(collect_i64(&batches, 0), vec![Some(2)]);
+        }
+    }
 }
