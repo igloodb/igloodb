@@ -598,11 +598,13 @@ mod tests {
     }
 
     /// Live-database integration tests through a real DataFusion
-    /// `SessionContext` against the seeded `my_pg_table` fixture
-    /// (`scripts/seed_test_db.sql`): (42, 'answer to everything'),
-    /// (7, 'lucky number'), (100, NULL). Each test reads
-    /// `IGLOO_TEST_POSTGRES_URI` and skips when unset, keeping plain
-    /// `cargo test` hermetic; the CI integration job runs them.
+    /// `SessionContext`. Each test creates its **own** uniquely-named table
+    /// with the shared fixture rows (42, 'answer to everything'),
+    /// (7, 'lucky number'), (100, NULL) and drops it afterwards, so tests
+    /// never collide — including across test binaries, which `cargo test`
+    /// runs in parallel. Tests read `IGLOO_TEST_POSTGRES_URI` and skip when
+    /// unset, keeping plain `cargo test` hermetic; the CI integration job
+    /// runs them.
     mod live {
         use crate::postgres_table::PostgresTable;
         use arrow::array::{Array, Int64Array, StringArray};
@@ -611,7 +613,7 @@ mod tests {
         use datafusion::prelude::SessionContext;
         use std::sync::Arc;
 
-        /// The `my_pg_table` schema: `user_id BIGINT NOT NULL`, `extra_info TEXT`.
+        /// The fixture schema: `user_id BIGINT NOT NULL`, `extra_info TEXT`.
         fn test_schema() -> SchemaRef {
             Arc::new(Schema::new(vec![
                 Field::new("user_id", DataType::Int64, false),
@@ -632,10 +634,33 @@ mod tests {
             };
         }
 
-        /// Register `my_pg_table` as `pg_table` in a fresh `SessionContext` and run
-        /// `sql`, returning the collected result batches.
-        async fn scan_via_datafusion(uri: &str, sql: &str) -> Vec<RecordBatch> {
-            let provider = PostgresTable::try_new(uri, "public", "my_pg_table", test_schema())
+        /// Creates a uniquely-named fixture table (three well-known rows)
+        /// and returns its name. The caller drops it via [`drop_table`].
+        async fn create_fixture(client: &tokio_postgres::Client, unique: &str) -> String {
+            let table = format!("igloo_it_{unique}");
+            client
+                .batch_execute(&format!(
+                    "DROP TABLE IF EXISTS {table};
+                     CREATE TABLE {table} (user_id BIGINT NOT NULL, extra_info TEXT);
+                     INSERT INTO {table} (user_id, extra_info) VALUES
+                       (42, 'answer to everything'), (7, 'lucky number'), (100, NULL);",
+                ))
+                .await
+                .expect("create fixture table");
+            table
+        }
+
+        /// Drops a fixture table, tolerating absence.
+        async fn drop_table(client: &tokio_postgres::Client, table: &str) {
+            let _ = client
+                .batch_execute(&format!("DROP TABLE IF EXISTS {table};"))
+                .await;
+        }
+
+        /// Registers `table` under the alias `pg_table` in a fresh
+        /// `SessionContext` and runs `sql`, returning collected batches.
+        async fn scan_via_datafusion(uri: &str, table: &str, sql: &str) -> Vec<RecordBatch> {
+            let provider = PostgresTable::try_new(uri, "public", table, test_schema())
                 .await
                 .expect("connect to PostgreSQL");
             let ctx = SessionContext::new();
@@ -649,7 +674,7 @@ mod tests {
                 .expect("collect results")
         }
 
-        /// Flatten an `Int64` column across all batches into nullable values.
+        /// Flattens an `Int64` column across all batches into nullable values.
         fn collect_i64(batches: &[RecordBatch], col_idx: usize) -> Vec<Option<i64>> {
             let mut out = Vec::new();
             for batch in batches {
@@ -669,7 +694,7 @@ mod tests {
             out
         }
 
-        /// Flatten a `Utf8` column across all batches into nullable owned strings.
+        /// Flattens a `Utf8` column across all batches into nullable owned strings.
         fn collect_str(batches: &[RecordBatch], col_idx: usize) -> Vec<Option<String>> {
             let mut out = Vec::new();
             for batch in batches {
@@ -692,50 +717,87 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn integration_filter_user_id_eq() {
             let uri = pg_uri_or_skip!("integration_filter_user_id_eq");
+            let (setup, connection) = tokio_postgres::connect(&uri, tokio_postgres::NoTls)
+                .await
+                .unwrap();
+            tokio::spawn(connection);
+            let table = create_fixture(&setup, "filter_eq").await;
+
             // `user_id = 42` is pushed down as an exact SQL predicate.
-            let batches =
-                scan_via_datafusion(&uri, "SELECT extra_info FROM pg_table WHERE user_id = 42")
-                    .await;
+            let batches = scan_via_datafusion(
+                &uri,
+                &table,
+                "SELECT extra_info FROM pg_table WHERE user_id = 42",
+            )
+            .await;
             assert_eq!(
                 collect_str(&batches, 0),
                 vec![Some("answer to everything".to_string())]
             );
+            drop_table(&setup, &table).await;
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn integration_filter_is_null() {
             let uri = pg_uri_or_skip!("integration_filter_is_null");
+            let (setup, connection) = tokio_postgres::connect(&uri, tokio_postgres::NoTls)
+                .await
+                .unwrap();
+            tokio::spawn(connection);
+            let table = create_fixture(&setup, "filter_null").await;
+
             // `extra_info IS NULL` is pushed down; only user_id 100 has a NULL.
             let batches = scan_via_datafusion(
                 &uri,
+                &table,
                 "SELECT user_id FROM pg_table WHERE extra_info IS NULL",
             )
             .await;
             assert_eq!(collect_i64(&batches, 0), vec![Some(100)]);
+            drop_table(&setup, &table).await;
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn integration_text_ordering_refiltered_above_scan() {
             let uri = pg_uri_or_skip!("integration_text_ordering_refiltered_above_scan");
+            let (setup, connection) = tokio_postgres::connect(&uri, tokio_postgres::NoTls)
+                .await
+                .unwrap();
+            tokio::spawn(connection);
+            let table = create_fixture(&setup, "text_ordering").await;
+
             // `extra_info > 'a'` is NOT pushed down (string ordering is unsupported),
             // so DataFusion re-applies it above the scan. Results must still be
             // correct: 'answer to everything' and 'lucky number' match, NULL does
             // not, so user_ids 7 and 42 remain (100 is excluded).
             let batches = scan_via_datafusion(
                 &uri,
+                &table,
                 "SELECT user_id FROM pg_table WHERE extra_info > 'a' ORDER BY user_id",
             )
             .await;
             assert_eq!(collect_i64(&batches, 0), vec![Some(7), Some(42)]);
+            drop_table(&setup, &table).await;
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn integration_count_with_filter() {
             let uri = pg_uri_or_skip!("integration_count_with_filter");
+            let (setup, connection) = tokio_postgres::connect(&uri, tokio_postgres::NoTls)
+                .await
+                .unwrap();
+            tokio::spawn(connection);
+            let table = create_fixture(&setup, "count_filter").await;
+
             // `user_id > 7` matches 42 and 100 -> COUNT(*) = 2.
-            let batches =
-                scan_via_datafusion(&uri, "SELECT COUNT(*) FROM pg_table WHERE user_id > 7").await;
+            let batches = scan_via_datafusion(
+                &uri,
+                &table,
+                "SELECT COUNT(*) FROM pg_table WHERE user_id > 7",
+            )
+            .await;
             assert_eq!(collect_i64(&batches, 0), vec![Some(2)]);
+            drop_table(&setup, &table).await;
         }
     }
 }

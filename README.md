@@ -109,7 +109,13 @@ IGLOO_LISTEN_ADDR=127.0.0.1:5442 cargo run -- serve
 psql -h 127.0.0.1 -p 5442 -c "SELECT * FROM iceberg LIMIT 10"
 ```
 
-`listen_addr`/`IGLOO_LISTEN_ADDR` is required in serve mode (fail-fast). The registered tables (`iceberg`, `pg_table`) are queryable with arbitrary SQL, including joins and aggregates. **The endpoint is currently unauthenticated plaintext** (see roadmap F4.2 for auth/TLS) — keep it on localhost or a trusted network.
+`listen_addr`/`IGLOO_LISTEN_ADDR` is required in serve mode (fail-fast). The registered tables (`iceberg`, `pg_table`) are queryable with arbitrary SQL, including joins and aggregates. Both the simple and the **extended query protocol** are supported, so prepared statements with parameters work from any driver:
+
+```sh
+psql -h 127.0.0.1 -p 5442 -c "SELECT * FROM pg_table WHERE user_id = $1"   # psql ≥ 16 (\bind)
+```
+
+Parameter types clients leave unspecified are inferred by the engine from the query context; results come back in whichever encoding (text or binary) the client requested. **The endpoint is currently unauthenticated plaintext** (see roadmap F4.2 for auth/TLS) — keep it on localhost or a trusted network.
 
 ### Crypto market metrics demo (`igloo crypto-demo`)
 
