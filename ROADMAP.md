@@ -55,7 +55,7 @@ PR #12 already did the rescue work (DataFusion 39→44, one Arrow major across t
 
 **Acceptance criteria**
 - [ ] The build is a Cargo workspace; `igloo-cache` and `igloo-connectors` compile and pass their tests without the server crate.
-- [ ] MSRV is enforced in CI (a dedicated MSRV job), and a documented policy states how closely DataFusion/Arrow track upstream releases (e.g. within one major version).
+- [x] MSRV is enforced in CI (a dedicated MSRV job): build + test run on exactly the toolchain named by `package.rust-version`, read dynamically from `Cargo.toml`. MSRV was raised to 1.88 — the true floor of the locked dependency graph (`ar_archive_writer 0.5.2` requires 1.88), verified empirically; the previously declared 1.80.1 could not even parse the lockfile. *(The documented policy for how closely DataFusion/Arrow track upstream releases remains open.)*
 - [x] `cargo deny` (or equivalent) runs in CI for license/advisory checks; the Dependabot findings currently open against main are resolved or explicitly waived. *(All five vulnerabilities fixed via `cargo update`; the unmaintained `paste` advisory is waived in `deny.toml` with rationale until the next arrow/datafusion major.)*
 - [ ] Behavior parity across any future major upgrade: the federated join demo (Parquet ⋈ Postgres) produces identical results, proven by an integration test that exists *before* the upgrade lands (depends on F0.1).
 

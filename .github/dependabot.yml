@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Dependency currency is policy, not heroics (roadmap F0.2): Dependabot
+  # proposes the bumps; cargo-deny and the test gates decide if they land.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

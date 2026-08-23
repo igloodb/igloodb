@@ -23,7 +23,8 @@ To maintain code quality and consistency, we use Rust's standard tooling:
 
 - **Formatting:** Code is formatted using `rustfmt`. Before submitting, please ensure your code is formatted by running `cargo fmt --all`.
 - **Linting:** We use `clippy` for linting. Please ensure your code is free of clippy warnings by running `cargo clippy --all-targets --all-features -- -D warnings`.
-- **Dependencies:** `cargo deny` checks licenses and security advisories in CI (config in `deny.toml`). New dependencies should be justified in the PR description; prefer the standard ecosystem crate over rolling our own.
+- **MSRV:** the minimum supported Rust version is declared as `package.rust-version` in `Cargo.toml` and CI builds and tests on exactly that toolchain (the `msrv` job). Keep it the true floor of the locked dependency graph — raise it only when a dependency forces it, and never casually.
+- **Dependencies:** `cargo deny` checks licenses and security advisories in CI (config in `deny.toml`). New dependencies should be justified in the PR description; prefer the standard ecosystem crate over rolling our own. Dependabot opens weekly update PRs — keeping them green is how dependency currency stays policy instead of heroics.
 
 Our Continuous Integration (CI) pipeline automatically checks for formatting and linting issues. Pull requests that do not pass these checks will not be merged.
 
