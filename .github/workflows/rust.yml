@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege by default; jobs that need more declare it themselves.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,6 +21,7 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v4
@@ -29,18 +34,47 @@ jobs:
     - name: Check formatting
       run: cargo fmt --all -- --check
     - name: Run Clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --all-targets --all-features --locked -- -D warnings
     - name: Check docs
-      run: cargo doc --no-deps
+      run: cargo doc --no-deps --locked
       env:
         RUSTDOCFLAGS: "-D warnings"
+    # `--locked` fails the build when Cargo.toml and Cargo.lock disagree,
+    # so a dependency bump can never land without its lockfile update.
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose --locked
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose --locked
+
+  msrv:
+    # Roadmap F0.2: the declared MSRV is load-bearing. Build and test on
+    # exactly the toolchain named by `package.rust-version` in Cargo.toml —
+    # read dynamically so there is a single source of truth.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v4
+    - name: Read declared MSRV from Cargo.toml
+      id: msrv
+      run: |
+        version=$(cargo metadata --no-deps --format-version 1 \
+          | jq -r '.packages[] | select(.name == "igloo") | .rust_version')
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "Declared MSRV: $version"
+    - name: Install Rust toolchain (${{ steps.msrv.outputs.version }})
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.msrv.outputs.version }}
+    - name: Cache cargo registry and build artifacts
+      uses: Swatinem/rust-cache@v2
+    - name: Check with locked dependencies
+      run: cargo check --all-targets --locked
+    - name: Test with locked dependencies
+      run: cargo test --locked
 
   deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - uses: actions/checkout@v4
     - name: Check licenses and security advisories
@@ -50,6 +84,7 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Informational for now (roadmap F0.1): surfaces the coverage trend
     # without blocking merges. Flip to blocking once a baseline exists.
     continue-on-error: true
@@ -60,10 +95,11 @@ jobs:
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
     - name: Report unit-test coverage
-      run: cargo llvm-cov --summary-only
+      run: cargo llvm-cov --summary-only --locked
 
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:15
@@ -88,10 +124,10 @@ jobs:
       run: psql 'postgres://postgres:postgres@localhost:5432/igloo_test' -f scripts/seed_test_db.sql
     - name: Run integration tests
       run: |
-        cargo test --lib integration_ -- --nocapture
-        cargo test --test postgres_federation -- --nocapture
-        cargo test --test catalog -- --nocapture
-        cargo test --test pushdown -- --nocapture
-        cargo test --test pgwire_server -- --nocapture --test-threads=2
+        cargo test --lib integration_ --locked -- --nocapture
+        cargo test --test postgres_federation --locked -- --nocapture
+        cargo test --test catalog --locked -- --nocapture
+        cargo test --test pushdown --locked -- --nocapture
+        cargo test --test pgwire_server --locked -- --nocapture --test-threads=2
       env:
         IGLOO_TEST_POSTGRES_URI: postgres://postgres:postgres@localhost:5432/igloo_test

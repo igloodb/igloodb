@@ -667,7 +667,7 @@ fn parse_timestamp_text(s: &str) -> Option<chrono::NaiveDateTime> {
 /// optional). Returns `None` for anything that is not valid hex pairs.
 fn parse_bytea_hex(s: &str) -> Option<Vec<u8>> {
     let hex = s.trim().strip_prefix("\\x").unwrap_or_else(|| s.trim());
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     (0..hex.len())

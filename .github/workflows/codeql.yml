@@ -1,0 +1,36 @@
+name: CodeQL
+
+# Static security analysis (SAST) of the Rust sources. Complements
+# cargo-deny's advisory scanning: CodeQL looks for vulnerabilities in our
+# own code paths (query handling, SQL generation, wire protocol), which is
+# where a network-facing server's risk lives. Weekly scan keeps main
+# covered even during quiet periods.
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    # Mondays 04:17 UTC — off the hour to avoid the runner rush.
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+          build-mode: none
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:rust"

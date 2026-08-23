@@ -2,7 +2,9 @@
 name = "igloo"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80.1"
+# Keep this the true floor of the locked dependency graph: CI builds and
+# tests on exactly this toolchain (the `msrv` job reads it from here).
+rust-version = "1.88"
 
 authors = ["Igloo Contributors"]
 description = "An experimental SQL query engine with an intelligent caching layer, built on DataFusion, Arrow and ADBC."
