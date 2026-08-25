@@ -341,48 +341,96 @@ impl TableProvider for PostgresTable {
                 }};
             }
 
-            let array_ref: ArrayRef = match field.data_type() {
-                DataType::Int16 => build_array!(
+            // The Arrow type alone is ambiguous for some columns: uuid/json/
+            // jsonb all present as Utf8, and tz-aware vs naive timestamps
+            // use different PostgreSQL wire decodings. The catalog stamps
+            // the source type into field metadata (see
+            // catalog::PG_TYPE_META_KEY) and it survives projection, so the
+            // decoder can pick the right Rust type to request.
+            let pg_kind = field
+                .metadata()
+                .get(crate::catalog::PG_TYPE_META_KEY)
+                .map(|s| s.as_str());
+
+            let array_ref: ArrayRef = match (field.data_type(), pg_kind) {
+                (DataType::Int16, _) => build_array!(
                     i16,
                     Int16Builder::with_capacity(rows.len()),
                     |v: i16| -> DFResult<i16> { Ok(v) }
                 ),
-                DataType::Int32 => build_array!(
+                (DataType::Int32, _) => build_array!(
                     i32,
                     Int32Builder::with_capacity(rows.len()),
                     |v: i32| -> DFResult<i32> { Ok(v) }
                 ),
-                DataType::Int64 => build_array!(
+                (DataType::Int64, _) => build_array!(
                     i64,
                     Int64Builder::with_capacity(rows.len()),
                     |v: i64| -> DFResult<i64> { Ok(v) }
                 ),
-                DataType::Float32 => build_array!(
+                (DataType::Float32, _) => build_array!(
                     f32,
                     Float32Builder::with_capacity(rows.len()),
                     |v: f32| -> DFResult<f32> { Ok(v) }
                 ),
-                DataType::Float64 => build_array!(
+                (DataType::Float64, _) => build_array!(
                     f64,
                     Float64Builder::with_capacity(rows.len()),
                     |v: f64| -> DFResult<f64> { Ok(v) }
                 ),
-                DataType::Boolean => build_array!(
+                (DataType::Boolean, _) => build_array!(
                     bool,
                     BooleanBuilder::with_capacity(rows.len()),
                     |v: bool| -> DFResult<bool> { Ok(v) }
                 ),
-                DataType::Utf8 => build_array!(
+                (DataType::Utf8, Some("uuid")) => build_array!(
+                    uuid::Uuid,
+                    StringBuilder::with_capacity(rows.len(), 36),
+                    |v: uuid::Uuid| -> DFResult<String> { Ok(v.to_string()) }
+                ),
+                (DataType::Utf8, Some("json") | Some("jsonb")) => build_array!(
+                    serde_json::Value,
+                    StringBuilder::with_capacity(rows.len(), 0),
+                    |v: serde_json::Value| -> DFResult<String> { Ok(v.to_string()) }
+                ),
+                (DataType::Utf8, _) => build_array!(
                     String,
                     StringBuilder::with_capacity(rows.len(), 0),
                     |v: String| -> DFResult<String> { Ok(v) }
                 ),
-                DataType::Binary => build_array!(
+                (DataType::Binary, _) => build_array!(
                     Vec<u8>,
                     BinaryBuilder::with_capacity(rows.len(), 0),
                     |v: Vec<u8>| -> DFResult<Vec<u8>> { Ok(v) }
                 ),
-                DataType::Timestamp(TimeUnit::Nanosecond, None) => build_array!(
+                // timestamptz arrives as a UTC instant; naive timestamp has
+                // no offset. Different tokio-postgres decode types. The
+                // finished array is re-stamped with the timezone so it
+                // matches the introspected schema exactly.
+                (DataType::Timestamp(TimeUnit::Nanosecond, Some(tz)), _) => {
+                    let mut builder = TimestampNanosecondBuilder::with_capacity(rows.len());
+                    for row in &rows {
+                        match row.try_get::<usize, Option<chrono::DateTime<chrono::Utc>>>(col_idx) {
+                            Ok(Some(v)) => {
+                                builder.append_value(v.timestamp_nanos_opt().ok_or_else(|| {
+                                    DataFusionError::Execution(format!(
+                                        "timestamp {} is out of range for nanosecond precision",
+                                        v
+                                    ))
+                                })?)
+                            }
+                            Ok(None) => builder.append_null(),
+                            Err(e) => {
+                                return Err(DataFusionError::External(Box::new(
+                                    IglooError::Postgres(e),
+                                )))
+                            }
+                        }
+                    }
+                    let _ = tz; // catalog normalizes every timestamptz to UTC
+                    Arc::new(builder.finish().with_timezone("+00:00")) as ArrayRef
+                }
+                (DataType::Timestamp(TimeUnit::Nanosecond, None), _) => build_array!(
                     chrono::NaiveDateTime,
                     TimestampNanosecondBuilder::with_capacity(rows.len()),
                     |v: chrono::NaiveDateTime| {
@@ -394,12 +442,12 @@ impl TableProvider for PostgresTable {
                         })
                     }
                 ),
-                DataType::Date32 => build_array!(
+                (DataType::Date32, _) => build_array!(
                     chrono::NaiveDate,
                     Date32Builder::with_capacity(rows.len()),
                     |v: chrono::NaiveDate| -> DFResult<i32> { Ok(Date32Type::from_naive_date(v)) }
                 ),
-                dt => {
+                (dt, _) => {
                     return Err(DataFusionError::External(Box::new(
                         IglooError::UnsupportedArrowType(dt.clone()),
                     )));
