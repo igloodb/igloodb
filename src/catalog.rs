@@ -18,6 +18,12 @@ use tokio_postgres::Client;
 
 use crate::errors::Result;
 
+/// Arrow field metadata key carrying the source PostgreSQL type for columns
+/// whose Arrow representation is ambiguous — several PG types map to the
+/// same [`DataType`] (e.g. `uuid`/`json`/`jsonb` all become `Utf8`). The
+/// scan decoder reads this to pick the right wire-format decoding.
+pub const PG_TYPE_META_KEY: &str = "igloo.pg_type";
+
 /// The introspected shape of one PostgreSQL base table: where it lives and
 /// the subset of its columns that map to Arrow types.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +55,12 @@ struct ColumnInfo {
 /// `timestamp without time zone`); `udt_name` is the underlying PostgreSQL
 /// type name (e.g. `float8`, `timestamp`) and is used as a fallback for
 /// spellings that vary by server version. The match is case-insensitive.
+///
+/// Types whose Arrow representation is ambiguous (`uuid`, `json`, `jsonb`
+/// all map to [`DataType::Utf8`]) must also be recorded in the field's
+/// metadata under [`PG_TYPE_META_KEY`] — see
+/// [`ambiguous_pg_type`]. `timestamptz` maps to a UTC-typed
+/// timestamp so it stays distinguishable from naive timestamps.
 pub fn pg_type_to_arrow(data_type: &str, udt_name: &str) -> Option<DataType> {
     let dt = data_type.to_ascii_lowercase();
     let udt = udt_name.to_ascii_lowercase();
@@ -63,6 +75,14 @@ pub fn pg_type_to_arrow(data_type: &str, udt_name: &str) -> Option<DataType> {
         "bytea" => Some(DataType::Binary),
         "date" => Some(DataType::Date32),
         "timestamp without time zone" => Some(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+        // Read as an instant and normalized to UTC; the tz-aware Arrow type
+        // keeps these distinct from naive timestamps (which decode with a
+        // different PostgreSQL wire representation).
+        "timestamp with time zone" => Some(DataType::Timestamp(
+            TimeUnit::Nanosecond,
+            Some("+00:00".into()),
+        )),
+        "json" | "jsonb" | "uuid" => Some(DataType::Utf8),
         _ => match udt.as_str() {
             // Fall back to the underlying type name for the common cases,
             // covering any server-specific `data_type` spelling drift.
@@ -76,9 +96,29 @@ pub fn pg_type_to_arrow(data_type: &str, udt_name: &str) -> Option<DataType> {
             "bytea" => Some(DataType::Binary),
             "date" => Some(DataType::Date32),
             "timestamp" => Some(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+            "timestamptz" => Some(DataType::Timestamp(
+                TimeUnit::Nanosecond,
+                Some("+00:00".into()),
+            )),
+            "json" | "jsonb" | "uuid" => Some(DataType::Utf8),
             _ => None,
         },
     }
+}
+
+/// The [`PG_TYPE_META_KEY`] metadata value for a column, populated only
+/// where the Arrow type alone cannot tell the scan decoder which PostgreSQL
+/// wire representation to read (`uuid`/`json`/`jsonb` all look like Utf8).
+pub fn ambiguous_pg_type(data_type: &str, udt_name: &str) -> Option<String> {
+    let dt = data_type.to_ascii_lowercase();
+    let udt = udt_name.to_ascii_lowercase();
+    if matches!(dt.as_str(), "uuid" | "json" | "jsonb") {
+        return Some(dt);
+    }
+    if matches!(udt.as_str(), "uuid" | "json" | "jsonb") {
+        return Some(udt);
+    }
+    None
 }
 
 /// The introspection query. Joins `information_schema.columns` to
@@ -136,7 +176,14 @@ fn group_columns_into_tables(columns: Vec<ColumnInfo>) -> Vec<TableSchema> {
     for col in columns {
         match pg_type_to_arrow(&col.data_type, &col.udt_name) {
             Some(dt) => {
-                let field = Field::new(&col.column, dt, col.is_nullable);
+                let mut field = Field::new(&col.column, dt, col.is_nullable);
+                // Stamp the source type where the Arrow type is ambiguous,
+                // so the scan decoder reads the right wire format.
+                if let Some(kind) = ambiguous_pg_type(&col.data_type, &col.udt_name) {
+                    field = field.with_metadata(
+                        [(PG_TYPE_META_KEY.to_string(), kind)].into_iter().collect(),
+                    );
+                }
                 match tables
                     .last_mut()
                     .filter(|t| t.schema == col.schema && t.name == col.table)
@@ -261,6 +308,13 @@ mod tests {
                 "timestamp",
                 DataType::Timestamp(TimeUnit::Nanosecond, None),
             ),
+            // timestamptz is a UTC-typed timestamp: same precision, distinct
+            // Arrow type so decoding knows which wire representation to read.
+            (
+                "timestamp with time zone",
+                "timestamptz",
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+            ),
         ];
         for (data_type, udt, expected) in cases {
             assert_eq!(
@@ -274,19 +328,46 @@ mod tests {
     }
 
     #[test]
+    fn text_shaped_types_map_to_utf8() {
+        // json/jsonb/uuid all surface as Utf8; their source kind is carried
+        // in field metadata (see ambiguous_pg_type) so scans decode right.
+        for pg in ["json", "jsonb", "uuid"] {
+            assert_eq!(pg_type_to_arrow(pg, pg), Some(DataType::Utf8), "{pg}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_types_are_stamped_into_metadata() {
+        for pg in ["uuid", "json", "jsonb"] {
+            let kind = ambiguous_pg_type(pg, pg).expect("stamped");
+            assert_eq!(kind, pg);
+        }
+        // Spelling-drift fallback via udt_name.
+        assert_eq!(
+            ambiguous_pg_type("weird spelling", "jsonb").as_deref(),
+            Some("jsonb")
+        );
+        // Unambiguous types carry no metadata.
+        assert_eq!(ambiguous_pg_type("text", "text"), None);
+        assert_eq!(
+            ambiguous_pg_type("timestamp without time zone", "timestamp"),
+            None
+        );
+        assert_eq!(ambiguous_pg_type("integer", "int4"), None);
+    }
+
+    #[test]
     fn type_mapping_is_case_insensitive() {
         assert_eq!(pg_type_to_arrow("BIGINT", "INT8"), Some(DataType::Int64));
+        assert_eq!(pg_type_to_arrow("UUID", "UUID"), Some(DataType::Utf8));
     }
 
     #[test]
     fn unsupported_types_map_to_none() {
-        assert_eq!(pg_type_to_arrow("uuid", "uuid"), None);
-        assert_eq!(pg_type_to_arrow("jsonb", "jsonb"), None);
         assert_eq!(pg_type_to_arrow("numeric", "numeric"), None);
-        assert_eq!(
-            pg_type_to_arrow("timestamp with time zone", "timestamptz"),
-            None
-        );
+        assert_eq!(pg_type_to_arrow("inet", "inet"), None);
+        assert_eq!(pg_type_to_arrow("ARRAY", "_text"), None);
+        assert_eq!(pg_type_to_arrow("time without time zone", "time"), None);
     }
 
     fn col(schema: &str, table: &str, column: &str, data_type: &str, udt: &str) -> ColumnInfo {
@@ -302,21 +383,56 @@ mod tests {
 
     #[test]
     fn table_with_unsupported_column_keeps_supported_subset() {
+        // text[] (udt _text) has no mapping; id and name do.
         let cols = vec![
             col("public", "t", "id", "bigint", "int8"),
-            col("public", "t", "tags", "jsonb", "jsonb"),
+            col("public", "t", "tags", "ARRAY", "_text"),
             col("public", "t", "name", "text", "text"),
         ];
         let tables = group_columns_into_tables(cols);
         assert_eq!(tables.len(), 1);
         let names: Vec<&str> = tables[0].fields.iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(names, vec!["id", "name"], "jsonb column dropped");
+        assert_eq!(names, vec!["id", "name"], "array column dropped");
+    }
+
+    #[test]
+    fn ambiguous_columns_carry_source_type_metadata() {
+        let cols = vec![
+            col("public", "t", "id", "uuid", "uuid"),
+            col("public", "t", "doc", "jsonb", "jsonb"),
+            col("public", "t", "label", "text", "text"),
+        ];
+        let tables = group_columns_into_tables(cols);
+        assert_eq!(tables.len(), 1);
+        let f = |name: &str| {
+            tables[0]
+                .fields
+                .iter()
+                .find(|f| f.name() == name)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            f("id").metadata().get(PG_TYPE_META_KEY).map(String::as_str),
+            Some("uuid")
+        );
+        assert_eq!(
+            f("doc")
+                .metadata()
+                .get(PG_TYPE_META_KEY)
+                .map(String::as_str),
+            Some("jsonb")
+        );
+        assert!(
+            !f("label").metadata().contains_key(PG_TYPE_META_KEY),
+            "plain text needs no source-type stamp"
+        );
     }
 
     #[test]
     fn table_with_zero_supported_columns_is_skipped() {
         let cols = vec![
-            col("public", "only_uuid", "id", "uuid", "uuid"),
+            col("public", "only_numeric", "id", "numeric", "numeric"),
             col("public", "keep", "n", "integer", "int4"),
         ];
         let tables = group_columns_into_tables(cols);

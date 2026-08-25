@@ -17,8 +17,16 @@ arrow = "53"
 datafusion = "44"
 adbc_core = { version = "0.16", features = ["driver_manager"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+# with-serde_json-1 / with-uuid-1 enable the FromSql impls the catalog's
+# json/jsonb and uuid column decoding relies on (see src/postgres_table.rs).
+tokio-postgres = { version = "0.7", features = [
+    "with-chrono-0_4",
+    "with-serde_json-1",
+    "with-uuid-1",
+] }
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
+serde_json = "1"
+uuid = "1"
 async-trait = "0.1"
 chrono = "0.4"
 serde = { version = "1", features = ["derive"] }

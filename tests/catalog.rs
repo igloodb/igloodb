@@ -92,25 +92,33 @@ async fn all_supported_types_round_trip_including_nulls() {
     client
         .batch_execute(
             "DROP TABLE IF EXISTS cat_all_types;
-             CREATE TABLE cat_all_types (
-                 c_smallint  smallint,
-                 c_integer   integer,
-                 c_bigint    bigint NOT NULL,
-                 c_real      real,
-                 c_double    double precision,
-                 c_text      text,
-                 c_varchar   varchar(32),
-                 c_char      character(4),
-                 c_bool      boolean,
-                 c_bytea     bytea,
-                 c_date      date,
-                 c_ts        timestamp without time zone
-             );
-             INSERT INTO cat_all_types VALUES
-                 (1, 2, 3, 4.5, 6.25, 'hi', 'vv', 'abcd', true,
-                  '\\xdeadbeef'::bytea, '2021-01-02', '2021-01-02 03:04:05'),
-                 (NULL, NULL, 9, NULL, NULL, NULL, NULL, NULL, NULL,
-                  NULL, NULL, NULL);",
+              CREATE TABLE cat_all_types (
+                  c_smallint  smallint,
+                  c_integer   integer,
+                  c_bigint    bigint NOT NULL,
+                  c_real      real,
+                  c_double    double precision,
+                  c_text      text,
+                  c_varchar   varchar(32),
+                  c_char      character(4),
+                  c_bool      boolean,
+                  c_bytea     bytea,
+                  c_date      date,
+                  c_ts        timestamp without time zone,
+                  c_tstz      timestamp with time zone,
+                  c_uuid      uuid,
+                  c_json      json,
+                  c_jsonb     jsonb
+              );
+              INSERT INTO cat_all_types VALUES
+                  (1, 2, 3, 4.5, 6.25, 'hi', 'vv', 'abcd', true,
+                   '\\xdeadbeef'::bytea, '2021-01-02', '2021-01-02 03:04:05',
+                   '2024-01-15 12:00:00+02'::timestamptz,
+                   'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid,
+                   '{\"k\": [1, true, \"two\"]}'::json,
+                   '{\"k\": [1, true, \"two\"]}'::jsonb),
+                  (NULL, NULL, 9, NULL, NULL, NULL, NULL, NULL, NULL,
+                   NULL, NULL, NULL, NULL, NULL, NULL, NULL);",
         )
         .await
         .expect("failed to create cat_all_types");
@@ -142,6 +150,29 @@ async fn all_supported_types_round_trip_including_nulls() {
     assert_eq!(ty("c_bytea"), DataType::Binary);
     assert_eq!(ty("c_date"), DataType::Date32);
     assert_eq!(ty("c_ts"), DataType::Timestamp(TimeUnit::Nanosecond, None));
+    // timestamptz reads back UTC-normalized under a tz-carrying Arrow type,
+    // distinct from naive timestamps.
+    assert_eq!(
+        ty("c_tstz"),
+        DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
+    );
+    // uuid/json/jsonb surface as Utf8 stamped with their source type so
+    // scans pick the right wire decoding.
+    assert_eq!(ty("c_uuid"), DataType::Utf8);
+    assert_eq!(ty("c_json"), DataType::Utf8);
+    assert_eq!(ty("c_jsonb"), DataType::Utf8);
+    let meta = |name: &str| {
+        schema
+            .field_with_name(name)
+            .unwrap()
+            .metadata()
+            .get(igloo::catalog::PG_TYPE_META_KEY)
+            .cloned()
+    };
+    assert_eq!(meta("c_uuid").as_deref(), Some("uuid"));
+    assert_eq!(meta("c_json").as_deref(), Some("json"));
+    assert_eq!(meta("c_jsonb").as_deref(), Some("jsonb"));
+    assert_eq!(meta("c_text"), None, "plain text needs no stamp");
 
     // Row 0 (c_bigint = 3): real values.
     let col = |name: &str| batch.column(schema.index_of(name).unwrap());
@@ -230,6 +261,36 @@ async fn all_supported_types_round_trip_including_nulls() {
             .value(0)
             > 0
     );
+    // '2024-01-15 12:00:00+02' normalizes to 2024-01-15T10:00:00Z.
+    assert_eq!(
+        col("c_tstz")
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .unwrap()
+            .value(0),
+        1_705_312_800_000_000_000
+    );
+    assert_eq!(
+        col("c_uuid")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+    );
+    // serde_json renders compactly; single-key objects keep key order, so
+    // both json and jsonb round-trip to the same deterministic string.
+    for name in ["c_json", "c_jsonb"] {
+        assert_eq!(
+            col(name)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            r#"{"k":[1,true,"two"]}"#,
+            "{name} round trip"
+        );
+    }
 
     // Row 1 (c_bigint = 9): every nullable column is NULL.
     for name in [
@@ -244,12 +305,92 @@ async fn all_supported_types_round_trip_including_nulls() {
         "c_bytea",
         "c_date",
         "c_ts",
+        "c_tstz",
+        "c_uuid",
+        "c_json",
+        "c_jsonb",
     ] {
         assert!(col(name).is_null(1), "{} should be NULL in row 1", name);
     }
 
     client
         .batch_execute("DROP TABLE IF EXISTS cat_all_types;")
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn uuid_and_json_columns_round_trip_end_to_end() {
+    let Ok(uri) = std::env::var("IGLOO_TEST_POSTGRES_URI") else {
+        eprintln!("skipping catalog test: IGLOO_TEST_POSTGRES_URI is not set");
+        return;
+    };
+    let _guard = db_guard().await;
+    let client = connect(&uri).await;
+
+    client
+        .batch_execute(
+            "DROP TABLE IF EXISTS cat_uuid_json;
+              CREATE TABLE cat_uuid_json (
+                  id    bigint NOT NULL,
+                  uid   uuid NOT NULL,
+                  doc   jsonb,
+                  label text
+              );
+              INSERT INTO cat_uuid_json (id, uid, doc, label)
+              VALUES (1, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid,
+                      '{\"k\": [1, true, \"two\"]}'::jsonb, 'keep');",
+        )
+        .await
+        .expect("failed to create cat_uuid_json");
+
+    let dir = temp_parquet_dir("uuidjson");
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
+        .await
+        .expect("engine init failed");
+
+    // All four columns are registered and readable, including through a
+    // predicate on the uuid column.
+    let batches = engine
+        .query(
+            "SELECT id, uid, doc, label FROM cat_uuid_json \
+             WHERE uid = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'",
+        )
+        .await
+        .expect("query over uuid/json table failed");
+    let batch = batches.iter().find(|b| b.num_rows() > 0).unwrap();
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(
+        batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+    );
+    assert_eq!(
+        batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        r#"{"k":[1,true,"two"]}"#
+    );
+    assert_eq!(
+        batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "keep"
+    );
+
+    client
+        .batch_execute("DROP TABLE IF EXISTS cat_uuid_json;")
         .await
         .unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
@@ -264,18 +405,17 @@ async fn unsupported_column_is_dropped_but_table_queryable() {
     let _guard = db_guard().await;
     let client = connect(&uri).await;
 
-    // uuid and jsonb have no Arrow mapping; id and label do.
+    // text[] has no Arrow mapping; id and label do.
     client
         .batch_execute(
             "DROP TABLE IF EXISTS cat_mixed;
-             CREATE TABLE cat_mixed (
-                 id     bigint NOT NULL,
-                 uid    uuid,
-                 blob   jsonb,
-                 label  text
-             );
-             INSERT INTO cat_mixed (id, uid, blob, label)
-             VALUES (1, gen_random_uuid(), '{\"a\":1}'::jsonb, 'keep');",
+              CREATE TABLE cat_mixed (
+                  id     bigint NOT NULL,
+                  tags   text[],
+                  label  text
+              );
+              INSERT INTO cat_mixed (id, tags, label)
+              VALUES (1, ARRAY['a','b'], 'keep');",
         )
         .await
         .expect("failed to create cat_mixed");
@@ -292,7 +432,7 @@ async fn unsupported_column_is_dropped_but_table_queryable() {
     let batch = batches.iter().find(|b| b.num_rows() > 0).unwrap();
     let schema = batch.schema();
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-    assert_eq!(names, vec!["id", "label"], "uuid + jsonb columns dropped");
+    assert_eq!(names, vec!["id", "label"], "array column dropped");
     assert_eq!(
         batch
             .column(1)
@@ -304,7 +444,7 @@ async fn unsupported_column_is_dropped_but_table_queryable() {
     );
 
     // Referencing the dropped column is a plan-time error, not a panic.
-    let err = engine.query("SELECT uid FROM cat_mixed").await;
+    let err = engine.query("SELECT tags FROM cat_mixed").await;
     assert!(err.is_err(), "unsupported column must not be selectable");
 
     client
