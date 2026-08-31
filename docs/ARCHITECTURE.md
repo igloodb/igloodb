@@ -2,7 +2,7 @@
 
 Igloo is a single-crate, single-process proof-of-concept SQL query engine with an in-memory result cache. It uses Apache DataFusion for SQL execution over two registered tables — a Parquet-backed "iceberg" table and a custom `tokio-postgres`-backed `pg_table` provider with conservative filter pushdown — caches the Arrow record batches of executed queries keyed by canonicalized SQL text, runs a separate ADBC FFI test query against PostgreSQL (demo mode), and invalidates the whole cache when the file-based CDC listener finds any JSON event. The README's formerly aspirational claims (distributed, ADBC-through-DataFusion, Iceberg materialized views) were corrected in this branch to describe the actual state; Iceberg integration remains roadmap-only.
 
-> **Evolution note.** This document was written as a point-in-time analysis and is kept accurate for the core engine paths (`postgres_table`, `datafusion_engine`, `adbc_postgres`, `errors`, the CDC listener's semantics). Since then, `main` has grown beyond it (see `ROADMAP.md`): a lib/bin split (`src/lib.rs`), fail-fast TOML+env configuration (`src/config.rs` — no more silent defaults; new `IGLOO_CONFIG`, `IGLOO_LISTEN_ADDR`, `IGLOO_CACHE_MAX_ENTRIES`, `IGLOO_CACHE_TTL_SECONDS`, `IGLOO_CDC_POLL_SECONDS` vars), a pgwire server (`src/server.rs`, `igloo serve`) serving queries from the cache with a background CDC polling loop (`CdcListener::spawn_polling`) and the full extended query protocol — prepared statements with `$1…$n` parameters in text or binary encoding, parameter types inferred by DataFusion at plan time, result columns honoring the portal's requested format — an Arrow-native bounded LRU+TTL thread-safe cache, dynamic PostgreSQL catalog introspection (F1.3, `src/catalog.rs` — see the module notes below), filter pushdown as a dedicated pure-translation module (F3.1, `src/pushdown.rs`, superseding this branch's in-provider implementation; this branch contributes the string-ordering collation gate), integration test suites under `tests/`, and cargo-deny/coverage CI jobs. The `main.rs` wiring and the Configuration Surface table below are superseded by `config.rs` where they disagree; per-module sections carry inline notes where the newer design changes them.
+> **Evolution note.** This document was written as a point-in-time analysis and is kept accurate for the core engine paths (`postgres_table`, `datafusion_engine`, `adbc_postgres`, `errors`, the CDC listener's semantics). Since then, `main` has grown beyond it (see `ROADMAP.md`): a lib/bin split (`src/lib.rs`), fail-fast TOML+env configuration (`src/config.rs` — no more silent defaults; new `IGLOO_CONFIG`, `IGLOO_LISTEN_ADDR`, `IGLOO_CACHE_MAX_ENTRIES`, `IGLOO_CACHE_TTL_SECONDS`, `IGLOO_CDC_POLL_SECONDS` vars), a pgwire server (`src/server.rs`, `igloo serve`) serving queries from the cache with a background CDC polling loop (`CdcListener::spawn_polling`) and the full extended query protocol — prepared statements with `$1…$n` parameters in text or binary encoding, parameter types inferred by DataFusion at plan time, result columns honoring the portal's requested format — an Arrow-native bounded LRU+TTL thread-safe cache, dynamic PostgreSQL catalog introspection over any number of configured sources (F1.3, `src/catalog.rs` + `[[sources]]` in `src/config.rs`, each source a DataFusion catalog queryable as `<source>.<schema>.<table>` — see the module notes below), filter pushdown as a dedicated pure-translation module (F3.1, `src/pushdown.rs`, superseding this branch's in-provider implementation; this branch contributes the string-ordering collation gate), integration test suites under `tests/`, and cargo-deny/coverage CI jobs. The `main.rs` wiring and the Configuration Surface table below are superseded by `config.rs` where they disagree; per-module sections carry inline notes where the newer design changes them.
 
 ## Directory Structure
 
@@ -34,6 +34,7 @@ igloodb/
 │   ├── postgres_federation.rs  # live-DB federated join test (env-gated)
 │   ├── catalog.rs              # live-DB introspection tests (env-gated)
 │   ├── pushdown.rs             # differential pushed-vs-unpushed tests (env-gated)
+│   ├── multi_source.rs         # multi-source federation over two live databases (env-gated)
 │   └── pgwire_server.rs        # pgwire server integration test
 └── src/
     ├── lib.rs               # library crate root exposing the modules below
@@ -67,14 +68,15 @@ Collaboration: constructs `Cache` (`src/main.rs:22`), `CdcListener` (`src/main.r
 
 ### `src/datafusion_engine.rs` — query engine facade
 Responsibility: owns a DataFusion `SessionContext`, registers the Parquet-backed `iceberg` table, and (since F1.3 on `main`) dynamically registers **every PostgreSQL base table** discovered by `catalog` introspection.
-Public API: `struct DataFusionEngine { pub ctx: SessionContext }`; `async fn new(parquet_path, postgres_conn_str, postgres_schemas) -> Result<Self>`; `async fn query(&self, sql) -> Result<Vec<RecordBatch>>`.
+Public API: `struct DataFusionEngine { pub ctx: SessionContext }`; `async fn new(parquet_path, sources: &[config::PostgresSource]) -> Result<Self>`; `async fn query(&self, sql) -> Result<Vec<RecordBatch>>`.
 Key decisions:
 - The context enables DataFusion's `information_schema` so BI tools can run `SHOW TABLES` against Igloo.
 - `iceberg` is a plain `ListingTable` over Parquet — no Iceberg format involvement. Its Arrow schema remains hardcoded to `user_id: Int64 (non-null)`, `data: Utf8` and must match the files. File extension is filtered to `.parquet` and partitions default to `num_cpus::get()`.
-- PostgreSQL tables are no longer hardcoded: `register_postgres_tables` introspects `information_schema.columns` via `src/catalog.rs` over one shared connection (`PostgresTable::from_client`), registering each discovered table (with a backward-compatible `pg_table` alias for `public.my_pg_table`).
+- PostgreSQL tables are no longer hardcoded: `register_postgres_sources` introspects `information_schema.columns` via `src/catalog.rs`, one shared connection per configured source (`PostgresTable::from_client`).
+- **Multi-source (F1.3 slice 3):** each `config::PostgresSource` becomes its own DataFusion catalog (`MemoryCatalogProvider`) with one schema provider per PostgreSQL schema, so every table has the canonical name `<source>.<schema>.<table>` and cross-source joins are ordinary SQL. The same `Arc<PostgresTable>` is additionally registered in the default catalog under an unqualified alias chosen by `catalog::resolve_aliases` (`table` → `schema__table` → `source__schema__table`, first free candidate wins in configured order, no silent shadowing), plus the backward-compatible `pg_table` alias for `my_pg_table`.
 - `query` is a thin wrapper over `ctx.sql(...).await?.collect().await?`.
-Collaboration: uses `catalog::introspect_tables`/`resolve_registration_names` and `PostgresTable::from_client`; consumed by `main` and `server`. Errors convert into `IglooError::DataFusion` via `?`.
-Tests: three unit tests over the Parquet path; the introspection path is covered by `tests/catalog.rs` (env-gated, live DB).
+Collaboration: uses `catalog::introspect_tables`/`resolve_aliases` and `PostgresTable::from_client`; consumed by `main` and `server`. Errors convert into `IglooError::DataFusion` via `?`.
+Tests: three unit tests over the Parquet path; the introspection path is covered by `tests/catalog.rs` and the multi-source registration by `tests/multi_source.rs` (both env-gated, live DB).
 
 ### `src/postgres_table.rs` — custom TableProvider over PostgreSQL
 Responsibility: expose a live Postgres table to DataFusion as an Arrow-producing `TableProvider`.
@@ -181,7 +183,7 @@ sequenceDiagram
 
 ## Configuration Surface
 
-> **Superseded** (see Evolution note): configuration is now owned by `src/config.rs` — an optional TOML file (path from `IGLOO_CONFIG`) with env-var overrides, and **fail-fast** semantics: `parquet_path`, `cdc_path`, and the Postgres URI are required (no hardcoded defaults). The same variable names below are still honored as env overrides, joined by `IGLOO_LISTEN_ADDR`, `IGLOO_CACHE_MAX_ENTRIES`, `IGLOO_CACHE_TTL_SECONDS`, and `IGLOO_CDC_POLL_SECONDS`. The `main.rs` line references below describe the pre-`config.rs` layout.
+> **Superseded** (see Evolution note): configuration is now owned by `src/config.rs` — an optional TOML file (path from `IGLOO_CONFIG`) with env-var overrides, and **fail-fast** semantics: `parquet_path`, `cdc_path`, and at least one PostgreSQL source are required (no hardcoded defaults). The same variable names below are still honored as env overrides, joined by `IGLOO_LISTEN_ADDR`, `IGLOO_CACHE_MAX_ENTRIES`, `IGLOO_CACHE_TTL_SECONDS`, and `IGLOO_CDC_POLL_SECONDS`. Sources come either from the single-source shorthand (`postgres_uri`/`postgres_schemas`, registered as the source named `postgres`) or from `[[sources]]` entries (`name`, `uri`, optional `schemas`/`tables`), each overridable by `IGLOO_SOURCE_<NAME>_URI` / `IGLOO_SOURCE_<NAME>_SCHEMAS` so credentials never need to live in a file; mixing both forms in the file is a startup error. The `main.rs` line references below describe the pre-`config.rs` layout.
 
 Env vars read by the original demo wiring:
 
@@ -230,6 +232,7 @@ A structural wrinkle: inside `PostgresTable::scan` the function signature is Dat
 | `config.rs` | (see file) | fail-fast validation and precedence tests added on `main`. |
 | `tests/postgres_federation.rs` | 1 (env-gated) | live federated Parquet ⋈ Postgres join end-to-end. |
 | `tests/pgwire_server.rs` | 2 | pgwire server round-trips against the cache. |
+| `tests/multi_source.rs` | 6 (5 env-gated) | two live databases as two sources: canonical `<source>.<schema>.<table>` resolution, cross-source join, `SHOW TABLES` listing both catalogs, per-source table allowlist, same-named tables not shadowing each other, non-default schemas; plus a hermetic connection-string rewrite test. |
 | `cdc_sync.rs` | 4 (`:93-153`) | events-present invalidation, no-events retention, missing/remote dir, non-JSON ignored. Good coverage of `sync`/`read_local_events`. |
 | `crypto_metrics.rs` | 3 unit + 1 integration | pinned metric SQL, exact hand-computed metric values through DataFusion, full-suite run over generated data; federated volume-by-name vs live Postgres (env-gated). |
 | `datafusion_engine.rs` | 3 | Parquet `iceberg` registration + query with filter/projection, empty-parquet-directory (the shipped demo condition) yields zero rows, second-row projection. |

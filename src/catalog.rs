@@ -123,8 +123,13 @@ pub fn ambiguous_pg_type(data_type: &str, udt_name: &str) -> Option<String> {
 
 /// The introspection query. Joins `information_schema.columns` to
 /// `information_schema.tables` so views are excluded (`BASE TABLE` only),
-/// restricted to the requested schemas, ordered so columns arrive in
-/// ordinal position within each table.
+/// restricted to the requested schemas and (optionally) an allowlist of
+/// table names, ordered so columns arrive in ordinal position within each
+/// table.
+///
+/// `$1` is the schema list; `$2` is the table allowlist or SQL `NULL` for
+/// "every table". Both are bound as parameters — never interpolated — so a
+/// hostile schema or table name cannot alter the statement.
 const INTROSPECT_SQL: &str = "\
 SELECT c.table_schema, c.table_name, c.column_name, \
        c.data_type, c.udt_name, c.is_nullable \
@@ -133,10 +138,15 @@ JOIN information_schema.tables t \
   ON c.table_schema = t.table_schema AND c.table_name = t.table_name \
 WHERE t.table_type = 'BASE TABLE' \
   AND c.table_schema = ANY($1) \
+  AND ($2::text[] IS NULL OR c.table_name::text = ANY($2::text[])) \
 ORDER BY c.table_schema, c.table_name, c.ordinal_position";
 
 /// Introspects `information_schema` for base tables in `schemas`, returning
 /// one [`TableSchema`] per table that has at least one mappable column.
+///
+/// `tables`, when given, is an allowlist: only tables whose name appears in
+/// it are introspected. Names in the allowlist that match nothing are
+/// reported with a warning, since a typo there silently hides data.
 ///
 /// Ordering follows `schemas`: tables in an earlier-listed schema come
 /// first (and alphabetically by name within a schema), which lets callers
@@ -145,8 +155,14 @@ ORDER BY c.table_schema, c.table_name, c.ordinal_position";
 /// Columns whose PostgreSQL type has no Arrow mapping are dropped with a
 /// per-column warning naming the table, column and type. A table left with
 /// zero mappable columns is omitted entirely, also with a warning.
-pub async fn introspect_tables(client: &Client, schemas: &[String]) -> Result<Vec<TableSchema>> {
-    let rows = client.query(INTROSPECT_SQL, &[&schemas]).await?;
+pub async fn introspect_tables(
+    client: &Client,
+    schemas: &[String],
+    tables: Option<&[String]>,
+) -> Result<Vec<TableSchema>> {
+    // `Option<&[String]>` binds as text[] or SQL NULL, which the query reads
+    // as "no allowlist".
+    let rows = client.query(INTROSPECT_SQL, &[&schemas, &tables]).await?;
 
     let columns: Vec<ColumnInfo> = rows
         .iter()
@@ -162,9 +178,27 @@ pub async fn introspect_tables(client: &Client, schemas: &[String]) -> Result<Ve
         })
         .collect();
 
-    let mut tables = group_columns_into_tables(columns);
-    order_by_schema_priority(&mut tables, schemas);
-    Ok(tables)
+    let mut discovered = group_columns_into_tables(columns);
+    order_by_schema_priority(&mut discovered, schemas);
+    if let Some(allowlist) = tables {
+        warn_unmatched_allowlist(allowlist, &discovered, schemas);
+    }
+    Ok(discovered)
+}
+
+/// Warns about allowlisted table names that no schema actually provided, so
+/// a typo in `tables = [...]` surfaces instead of silently hiding data.
+fn warn_unmatched_allowlist(allowlist: &[String], found: &[TableSchema], schemas: &[String]) {
+    for wanted in allowlist {
+        if !found.iter().any(|t| &t.name == wanted) {
+            log::warn!(
+                "configured table {:?} was not found as a base table in schemas {:?}; \
+                 it will not be registered",
+                wanted,
+                schemas
+            );
+        }
+    }
 }
 
 /// Groups a flat, table-ordered column list into [`TableSchema`]s, applying
@@ -256,30 +290,92 @@ fn order_by_schema_priority(tables: &mut [TableSchema], schemas: &[String]) {
     });
 }
 
-/// Given introspected tables (already in priority order), decides the
-/// DataFusion registration name for each: the bare table name if free,
-/// otherwise a `schema__table` qualified name. Returns names paired with
-/// their table, in the input order. Pure and deterministic so collision
-/// handling can be unit tested.
-pub fn resolve_registration_names(tables: &[TableSchema]) -> Vec<(String, &TableSchema)> {
-    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(tables.len());
-    for t in tables {
-        let name = if used.contains(&t.name) {
-            let qualified = format!("{}__{}", t.schema, t.name);
-            log::warn!(
-                "table name {:?} already registered; registering {}.{} as {:?} instead",
-                t.name,
-                t.schema,
-                t.name,
-                qualified
-            );
-            qualified
-        } else {
-            t.name.clone()
-        };
-        used.insert(name.clone());
-        out.push((name, t));
+/// The tables discovered in one configured source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceTables {
+    /// The source's catalog name (see [`crate::config::PostgresSource`]).
+    pub source: String,
+    /// Its introspected tables, in registration-priority order.
+    pub tables: Vec<TableSchema>,
+}
+
+/// A convenience alias in the default catalog: `alias` resolves to
+/// `source.schema.table`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Alias<'a> {
+    /// The unqualified name to register in the default catalog.
+    pub alias: String,
+    /// The source (catalog) the aliased table belongs to.
+    pub source: &'a str,
+    /// The aliased table.
+    pub table: &'a TableSchema,
+}
+
+/// Decides the unqualified alias each discovered table gets in the default
+/// catalog, so short names like `orders` keep working alongside the always-
+/// available canonical name `<source>.<schema>.<table>`.
+///
+/// Candidates are tried in order and the first free one wins:
+///
+/// 1. `table` — the bare name,
+/// 2. `schema__table` — when another source or schema already took the bare
+///    name,
+/// 3. `source__schema__table` — when that is taken too.
+///
+/// `reserved` names are treated as already taken, which is how names the
+/// engine registers itself (`iceberg`, the legacy `pg_table` alias) stay
+/// unshadowable by an upstream table that happens to share them.
+///
+/// Sources are processed in configured order, so the primary (first) source
+/// keeps the bare names. A table whose every candidate is taken gets no
+/// alias (with a warning); it is still queryable by its canonical
+/// three-part name. Pure and deterministic so collision handling can be unit
+/// tested.
+pub fn resolve_aliases<'a>(sources: &'a [SourceTables], reserved: &[&str]) -> Vec<Alias<'a>> {
+    let mut used: std::collections::HashSet<String> =
+        reserved.iter().map(|r| r.to_string()).collect();
+    let mut out = Vec::new();
+    for source in sources {
+        for table in &source.tables {
+            let candidates = [
+                table.name.clone(),
+                format!("{}__{}", table.schema, table.name),
+                format!("{}__{}__{}", source.source, table.schema, table.name),
+            ];
+            match candidates.iter().find(|c| !used.contains(*c)) {
+                Some(alias) => {
+                    if alias != &table.name {
+                        log::warn!(
+                            "unqualified name {:?} is already registered; aliasing \
+                             {}.{}.{} as {:?} instead (its {}.{}.{} name always works)",
+                            table.name,
+                            source.source,
+                            table.schema,
+                            table.name,
+                            alias,
+                            source.source,
+                            table.schema,
+                            table.name
+                        );
+                    }
+                    used.insert(alias.clone());
+                    out.push(Alias {
+                        alias: alias.clone(),
+                        source: &source.source,
+                        table,
+                    });
+                }
+                None => log::warn!(
+                    "no unqualified alias left for {}.{}.{}; query it as {}.{}.{}",
+                    source.source,
+                    table.schema,
+                    table.name,
+                    source.source,
+                    table.schema,
+                    table.name
+                ),
+            }
+        }
     }
     out
 }
@@ -456,22 +552,119 @@ mod tests {
         }
     }
 
+    fn src(source: &str, tables: Vec<TableSchema>) -> SourceTables {
+        SourceTables {
+            source: source.into(),
+            tables,
+        }
+    }
+
+    /// The resolved alias names, in resolution order, with nothing reserved.
+    fn alias_names(sources: &[SourceTables]) -> Vec<String> {
+        resolve_aliases(sources, &[])
+            .into_iter()
+            .map(|a| a.alias)
+            .collect()
+    }
+
     #[test]
     fn registration_uses_bare_name_when_free() {
-        let tables = vec![tbl("public", "orders"), tbl("public", "users")];
-        let resolved = resolve_registration_names(&tables);
-        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["orders", "users"]);
+        let sources = vec![src(
+            "pg",
+            vec![tbl("public", "orders"), tbl("public", "users")],
+        )];
+        assert_eq!(alias_names(&sources), vec!["orders", "users"]);
     }
 
     #[test]
     fn registration_qualifies_on_collision() {
-        // Same bare name in two schemas: first (priority-ordered) keeps the
-        // bare name, the second is qualified as schema__table.
-        let tables = vec![tbl("public", "widget"), tbl("analytics", "widget")];
-        let resolved = resolve_registration_names(&tables);
-        let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["widget", "analytics__widget"]);
+        // Same bare name in two schemas of one source: the first
+        // (priority-ordered) keeps the bare name, the second becomes
+        // schema__table.
+        let sources = vec![src(
+            "pg",
+            vec![tbl("public", "widget"), tbl("analytics", "widget")],
+        )];
+        assert_eq!(alias_names(&sources), vec!["widget", "analytics__widget"]);
+    }
+
+    #[test]
+    fn primary_source_keeps_bare_names_across_sources() {
+        // Both sources expose public.widget: the first source configured wins
+        // the bare alias, the second falls back to schema__table.
+        let sources = vec![
+            src("alpha", vec![tbl("public", "widget")]),
+            src("beta", vec![tbl("public", "widget")]),
+        ];
+        let resolved = resolve_aliases(&sources, &[]);
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|a| (a.alias.as_str(), a.source))
+                .collect::<Vec<_>>(),
+            vec![("widget", "alpha"), ("public__widget", "beta")]
+        );
+    }
+
+    #[test]
+    fn third_candidate_includes_the_source_name() {
+        // widget, public__widget and then gamma__public__widget: the source
+        // name disambiguates once both shorter candidates are taken.
+        let sources = vec![
+            src("alpha", vec![tbl("public", "widget")]),
+            src("beta", vec![tbl("public", "widget")]),
+            src("gamma", vec![tbl("public", "widget")]),
+        ];
+        assert_eq!(
+            alias_names(&sources),
+            vec!["widget", "public__widget", "gamma__public__widget"]
+        );
+    }
+
+    #[test]
+    fn table_without_any_free_alias_is_skipped_not_overwritten() {
+        // Exhausting all three candidates takes contrived naming: `widget` and
+        // `public__widget` are taken by the first two sources, and a table
+        // literally named `s__public__widget` occupies the third candidate of
+        // source `s`. That table must be skipped rather than shadow an
+        // existing alias — it stays reachable as s.public.widget.
+        let sources = vec![
+            src("alpha", vec![tbl("public", "widget")]),
+            src("beta", vec![tbl("public", "widget")]),
+            src("x", vec![tbl("public", "s__public__widget")]),
+            src("s", vec![tbl("public", "widget")]),
+        ];
+        let resolved = resolve_aliases(&sources, &[]);
+        assert_eq!(
+            alias_names(&sources),
+            vec!["widget", "public__widget", "s__public__widget"],
+            "the fourth table gets no alias"
+        );
+        let sources_with_alias: Vec<&str> = resolved.iter().map(|a| a.source).collect();
+        assert_eq!(sources_with_alias, vec!["alpha", "beta", "x"]);
+    }
+
+    #[test]
+    fn aliases_point_at_their_own_source_and_table() {
+        let sources = vec![
+            src("alpha", vec![tbl("public", "a")]),
+            src("beta", vec![tbl("sales", "b")]),
+        ];
+        let resolved = resolve_aliases(&sources, &[]);
+        assert_eq!(resolved[0].source, "alpha");
+        assert_eq!(resolved[0].table.schema, "public");
+        assert_eq!(resolved[1].source, "beta");
+        assert_eq!(resolved[1].table.name, "b");
+    }
+
+    #[test]
+    fn reserved_names_are_never_shadowed() {
+        // The engine registers `iceberg` itself; an upstream table of that
+        // name must fall back to a qualified alias rather than clash.
+        let sources = vec![src("pg", vec![tbl("public", "iceberg")])];
+        let resolved = resolve_aliases(&sources, &["iceberg", "pg_table"]);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].alias, "public__iceberg");
     }
 
     #[test]

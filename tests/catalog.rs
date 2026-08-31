@@ -33,7 +33,18 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
 use tokio_postgres::{Client, NoTls};
 
+use igloo::config::PostgresSource;
 use igloo::datafusion_engine::DataFusionEngine;
+
+/// The single PostgreSQL source these tests federate over: every base table
+/// in the `public` schema of the test database.
+fn pg_sources(uri: &str) -> Vec<PostgresSource> {
+    vec![PostgresSource::new(
+        "postgres",
+        uri,
+        vec!["public".to_string()],
+    )]
+}
 
 /// Tests here mutate shared catalog state; serialize them within this binary.
 static DB_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -124,7 +135,7 @@ async fn all_supported_types_round_trip_including_nulls() {
         .expect("failed to create cat_all_types");
 
     let dir = temp_parquet_dir("alltypes");
-    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &pg_sources(&uri))
         .await
         .expect("engine init failed");
 
@@ -346,7 +357,7 @@ async fn uuid_and_json_columns_round_trip_end_to_end() {
         .expect("failed to create cat_uuid_json");
 
     let dir = temp_parquet_dir("uuidjson");
-    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &pg_sources(&uri))
         .await
         .expect("engine init failed");
 
@@ -421,7 +432,7 @@ async fn unsupported_column_is_dropped_but_table_queryable() {
         .expect("failed to create cat_mixed");
 
     let dir = temp_parquet_dir("mixed");
-    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &pg_sources(&uri))
         .await
         .expect("engine init failed");
 
@@ -476,8 +487,11 @@ async fn table_in_second_schema_is_registered_and_queryable() {
     let dir = temp_parquet_dir("secondschema");
     let engine = DataFusionEngine::new(
         dir.to_str().unwrap(),
-        &uri,
-        &["public".to_string(), "cat_other".to_string()],
+        &[PostgresSource::new(
+            "postgres",
+            &uri,
+            vec!["public".to_string(), "cat_other".to_string()],
+        )],
     )
     .await
     .expect("engine init failed");
@@ -537,7 +551,7 @@ async fn show_tables_lists_registered_catalog_and_legacy_alias_works() {
         .expect("failed to seed tables");
 
     let dir = temp_parquet_dir("show");
-    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &pg_sources(&uri))
         .await
         .expect("engine init failed");
 
@@ -592,6 +606,80 @@ async fn show_tables_lists_registered_catalog_and_legacy_alias_works() {
 
     client
         .batch_execute("DROP TABLE IF EXISTS cat_show;")
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// An upstream table whose name collides with a table the engine registers
+/// itself (`iceberg`) must not break startup or shadow the built-in: it gets
+/// a qualified alias, and its canonical `<source>.<schema>.<table>` name
+/// always works.
+#[tokio::test]
+async fn upstream_table_named_iceberg_does_not_shadow_the_parquet_table() {
+    let Ok(uri) = std::env::var("IGLOO_TEST_POSTGRES_URI") else {
+        eprintln!("skipping catalog test: IGLOO_TEST_POSTGRES_URI is not set");
+        return;
+    };
+    let _guard = db_guard().await;
+    let client = connect(&uri).await;
+
+    client
+        .batch_execute(
+            "DROP TABLE IF EXISTS iceberg;
+             CREATE TABLE iceberg (id bigint NOT NULL, origin text);
+             INSERT INTO iceberg (id, origin) VALUES (1, 'from-postgres');",
+        )
+        .await
+        .expect("failed to create a colliding table");
+
+    let dir = temp_parquet_dir("collide");
+    write_parquet_fixture(&dir);
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &pg_sources(&uri))
+        .await
+        .expect("engine must start despite the name collision");
+
+    // `iceberg` still resolves to the Parquet table (user_id/data columns).
+    let batches = engine
+        .query("SELECT data FROM iceberg WHERE user_id = 42")
+        .await
+        .expect("built-in iceberg table must stay queryable");
+    let batch = batches.iter().find(|b| b.num_rows() > 0).unwrap();
+    assert_eq!(
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "hello"
+    );
+
+    // The upstream table is reachable by its canonical name and its
+    // qualified alias.
+    for sql in [
+        "SELECT origin FROM postgres.public.iceberg",
+        "SELECT origin FROM public__iceberg",
+    ] {
+        let batches = engine
+            .query(sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql} failed: {e}"));
+        let batch = batches.iter().find(|b| b.num_rows() > 0).unwrap();
+        assert_eq!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "from-postgres",
+            "{sql}"
+        );
+    }
+
+    client
+        .batch_execute("DROP TABLE IF EXISTS iceberg;")
         .await
         .unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
