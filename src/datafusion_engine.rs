@@ -1,6 +1,8 @@
 // src/datafusion_engine.rs
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::catalog::{CatalogProvider, SchemaProvider, TableProvider};
+use datafusion::catalog_common::memory::{MemoryCatalogProvider, MemorySchemaProvider};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
@@ -11,12 +13,15 @@ use datafusion::scalar::ScalarValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio_postgres::NoTls;
+use tokio_postgres::{Client, NoTls};
 
-use crate::catalog;
+use crate::catalog::{self, SourceTables, TableSchema};
+use crate::config::PostgresSource;
 use crate::errors::{IglooError, Result};
 use crate::postgres_table::PostgresTable;
 
+/// Name of the Parquet-backed table in the default catalog.
+const ICEBERG_TABLE: &str = "iceberg";
 /// The legacy table name the demo binary and pre-F1.3 integration tests
 /// query. When a `my_pg_table` is discovered it is additionally registered
 /// under this alias for backward compatibility.
@@ -30,14 +35,10 @@ pub struct DataFusionEngine {
 
 impl DataFusionEngine {
     /// Builds the engine, registering the Parquet-backed `iceberg` table and
-    /// every PostgreSQL base table discovered in `postgres_schemas` (default
-    /// `["public"]`). Filter pushdown to PostgreSQL is enabled.
-    pub async fn new(
-        parquet_path: &str,
-        postgres_conn_str: &str,
-        postgres_schemas: &[String],
-    ) -> Result<Self> {
-        Self::new_with_pushdown(parquet_path, postgres_conn_str, postgres_schemas, true).await
+    /// every PostgreSQL base table discovered in each configured source.
+    /// Filter pushdown to PostgreSQL is enabled.
+    pub async fn new(parquet_path: &str, sources: &[PostgresSource]) -> Result<Self> {
+        Self::new_with_pushdown(parquet_path, sources, true).await
     }
 
     /// Like [`Self::new`] but lets the caller disable filter pushdown on the
@@ -47,8 +48,7 @@ impl DataFusionEngine {
     /// unpushed execution and assert identical results.
     pub async fn new_with_pushdown(
         parquet_path: &str,
-        postgres_conn_str: &str,
-        postgres_schemas: &[String],
+        sources: &[PostgresSource],
         filter_pushdown: bool,
     ) -> Result<Self> {
         // Enable DataFusion's information_schema so BI tools (and tests) can
@@ -56,9 +56,11 @@ impl DataFusionEngine {
         let ctx =
             SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
         Self::register_iceberg_table(&ctx, parquet_path)?;
-        Self::register_postgres_tables(&ctx, postgres_conn_str, postgres_schemas, filter_pushdown)
-            .await?;
-        log::info!("DataFusion context initialized with Iceberg and Postgres tables.");
+        Self::register_postgres_sources(&ctx, sources, filter_pushdown).await?;
+        log::info!(
+            "DataFusion context initialized with the Iceberg table and {} PostgreSQL source(s).",
+            sources.len()
+        );
         Ok(Self { ctx })
     }
 
@@ -81,91 +83,163 @@ impl DataFusionEngine {
             .with_schema(iceberg_schema);
 
         let iceberg_table = Arc::new(ListingTable::try_new(listing_table_config)?);
-        ctx.register_table("iceberg", iceberg_table)?;
+        ctx.register_table(ICEBERG_TABLE, iceberg_table)?;
         Ok(())
     }
 
-    /// Introspects PostgreSQL and registers one DataFusion table per
-    /// discovered base table in `schemas`.
+    /// Introspects every configured PostgreSQL source and registers its
+    /// tables twice over:
     ///
-    /// Each table is registered under its bare name; on a name collision
-    /// across schemas the first (in schema-priority order) keeps the bare
-    /// name and the later one is registered as `schema__table` (see
-    /// [`catalog::resolve_registration_names`]). For backward compatibility a
-    /// discovered `my_pg_table` is additionally registered under the legacy
-    /// alias `pg_table`. If no tables are found the engine still starts (with
-    /// a warning) — the Parquet source may be all that's needed.
-    async fn register_postgres_tables(
+    /// * canonically, in a DataFusion catalog named after the source, so
+    ///   `<source>.<schema>.<table>` always resolves — this is the name BI
+    ///   tools see and the only one guaranteed unique; and
+    /// * as an unqualified alias in the default catalog (`orders`), so short
+    ///   names stay ergonomic. Collisions across sources and schemas are
+    ///   broken deterministically by [`catalog::resolve_aliases`].
+    ///
+    /// A discovered `my_pg_table` in the primary source additionally keeps
+    /// the legacy `pg_table` alias. If a source yields no tables the engine
+    /// still starts (with a warning) — the Parquet source may be all that's
+    /// needed.
+    async fn register_postgres_sources(
         ctx: &SessionContext,
-        postgres_conn_str: &str,
-        schemas: &[String],
+        sources: &[PostgresSource],
         filter_pushdown: bool,
     ) -> Result<()> {
-        // One shared connection drives introspection and every table's scans.
-        let (client, connection) = tokio_postgres::connect(postgres_conn_str, NoTls)
-            .await
-            .map_err(IglooError::Postgres)?;
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                log::error!("PostgreSQL connection error: {}", e);
-            }
-        });
-        let client = Arc::new(client);
+        let mut discovered: Vec<SourceTables> = Vec::with_capacity(sources.len());
+        // One shared connection per source drives its introspection and all
+        // of its scans.
+        let mut clients: HashMap<&str, Arc<Client>> = HashMap::new();
 
-        let tables = catalog::introspect_tables(&client, schemas).await?;
-        if tables.is_empty() {
-            log::warn!(
-                "no PostgreSQL base tables found in schemas {:?}; \
-                 starting with no Postgres tables registered",
-                schemas
-            );
-            return Ok(());
+        for source in sources {
+            let client = Self::connect(source).await?;
+            let tables =
+                catalog::introspect_tables(&client, &source.schemas, source.tables.as_deref())
+                    .await?;
+            if tables.is_empty() {
+                log::warn!(
+                    "source {:?}: no PostgreSQL base tables found in schemas {:?}; \
+                     registering none",
+                    source.name,
+                    source.schemas
+                );
+            }
+            clients.insert(source.name.as_str(), client);
+            discovered.push(SourceTables {
+                source: source.name.clone(),
+                tables,
+            });
         }
 
+        // Canonical <source>.<schema>.<table> registration, one catalog per
+        // source. Providers are shared (Arc) with the alias registration
+        // below so both names hit the same connection and counters.
+        let mut providers: HashMap<(&str, &str, &str), Arc<dyn TableProvider>> = HashMap::new();
+        for source in &discovered {
+            let client = clients
+                .get(source.source.as_str())
+                .expect("client registered above");
+            let catalog_provider = Arc::new(MemoryCatalogProvider::new());
+            for table in &source.tables {
+                let provider = Self::table_provider(client.clone(), table, filter_pushdown);
+                Self::schema_provider(&catalog_provider, &table.schema)?
+                    .register_table(table.name.clone(), provider.clone())?;
+                providers.insert(
+                    (&source.source, &table.schema, &table.name),
+                    provider.clone(),
+                );
+                log::info!(
+                    "registered PostgreSQL table {}.{}.{} ({} column(s))",
+                    source.source,
+                    table.schema,
+                    table.name,
+                    table.fields.len()
+                );
+            }
+            ctx.register_catalog(source.source.clone(), catalog_provider);
+        }
+
+        // Unqualified aliases in the default catalog. `iceberg` and the
+        // legacy alias are reserved so an upstream table of the same name
+        // cannot clash with them.
         let mut legacy_registered = false;
-        for (reg_name, table) in catalog::resolve_registration_names(&tables) {
-            let arrow_schema = Arc::new(ArrowSchema::new(table.fields.clone()));
-            let provider = Arc::new(
-                PostgresTable::from_client(
-                    client.clone(),
-                    &table.schema,
-                    &table.name,
-                    arrow_schema.clone(),
-                )
-                .with_filter_pushdown(filter_pushdown),
-            );
-            ctx.register_table(reg_name.as_str(), provider)?;
-            log::info!(
-                "registered Postgres table {}.{} as {:?} ({} column(s))",
-                table.schema,
-                table.name,
-                reg_name,
-                table.fields.len()
+        for alias in catalog::resolve_aliases(&discovered, &[ICEBERG_TABLE, LEGACY_ALIAS]) {
+            let provider = providers
+                .get(&(
+                    alias.source,
+                    alias.table.schema.as_str(),
+                    alias.table.name.as_str(),
+                ))
+                .expect("provider built above")
+                .clone();
+            ctx.register_table(alias.alias.as_str(), provider.clone())?;
+            log::debug!(
+                "aliased {}.{}.{} as {:?}",
+                alias.source,
+                alias.table.schema,
+                alias.table.name,
+                alias.alias
             );
 
             // Backward compatibility: expose my_pg_table under `pg_table` too.
-            if !legacy_registered && table.name == LEGACY_SOURCE_TABLE {
-                let alias_provider = Arc::new(
-                    PostgresTable::from_client(
-                        client.clone(),
-                        &table.schema,
-                        &table.name,
-                        arrow_schema,
-                    )
-                    .with_filter_pushdown(filter_pushdown),
-                );
-                ctx.register_table(LEGACY_ALIAS, alias_provider)?;
+            if !legacy_registered && alias.table.name == LEGACY_SOURCE_TABLE {
+                ctx.register_table(LEGACY_ALIAS, provider)?;
                 legacy_registered = true;
                 log::info!(
-                    "registered legacy alias {:?} -> {}.{} (deprecated; \
-                     prefer the bare table name)",
+                    "registered legacy alias {:?} -> {}.{}.{} (deprecated; \
+                     prefer the qualified table name)",
                     LEGACY_ALIAS,
-                    table.schema,
-                    table.name
+                    alias.source,
+                    alias.table.schema,
+                    alias.table.name
                 );
             }
         }
         Ok(())
+    }
+
+    /// Opens the connection for one source, driving its connection task in
+    /// the background for the client's lifetime.
+    async fn connect(source: &PostgresSource) -> Result<Arc<Client>> {
+        let (client, connection) = tokio_postgres::connect(source.uri.expose(), NoTls)
+            .await
+            .map_err(IglooError::Postgres)?;
+        let name = source.name.clone();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                // The URI (and any credentials in it) is never logged.
+                log::error!("PostgreSQL connection error on source {:?}: {}", name, e);
+            }
+        });
+        Ok(Arc::new(client))
+    }
+
+    /// Builds the table provider for one introspected table.
+    fn table_provider(
+        client: Arc<Client>,
+        table: &TableSchema,
+        filter_pushdown: bool,
+    ) -> Arc<dyn TableProvider> {
+        let arrow_schema = Arc::new(ArrowSchema::new(table.fields.clone()));
+        Arc::new(
+            PostgresTable::from_client(client, &table.schema, &table.name, arrow_schema)
+                .with_filter_pushdown(filter_pushdown),
+        )
+    }
+
+    /// Returns the catalog's schema provider for `name`, creating it on first
+    /// use so each PostgreSQL schema becomes a DataFusion schema.
+    fn schema_provider(
+        catalog: &MemoryCatalogProvider,
+        name: &str,
+    ) -> Result<Arc<dyn SchemaProvider>> {
+        if let Some(existing) = catalog.schema(name) {
+            return Ok(existing);
+        }
+        catalog.register_schema(name, Arc::new(MemorySchemaProvider::new()))?;
+        Ok(catalog
+            .schema(name)
+            .expect("schema registered on the line above"))
     }
 
     pub async fn query(&self, sql: &str) -> Result<Vec<RecordBatch>> {

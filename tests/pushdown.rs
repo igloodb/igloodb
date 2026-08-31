@@ -29,8 +29,19 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
 use tokio_postgres::{Client, NoTls};
 
+use igloo::config::PostgresSource;
 use igloo::datafusion_engine::DataFusionEngine;
 use igloo::postgres_table::PostgresTable;
+
+/// The single PostgreSQL source these tests federate over: every base table
+/// in the `public` schema of the test database.
+fn pg_sources(uri: &str) -> Vec<PostgresSource> {
+    vec![PostgresSource::new(
+        "postgres",
+        uri,
+        vec!["public".to_string()],
+    )]
+}
 
 /// Tests here mutate shared catalog state; serialize them within this binary.
 static DB_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -183,7 +194,7 @@ async fn selective_query_reduces_rows_fetched_from_postgres() {
     seed(&client).await;
 
     let dir = temp_parquet_dir("reduce");
-    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &pg_sources(&uri))
         .await
         .expect("engine init failed");
 
@@ -228,14 +239,10 @@ async fn without_pushdown_fetches_the_whole_table() {
     seed(&client).await;
 
     let dir = temp_parquet_dir("nopush");
-    let engine = DataFusionEngine::new_with_pushdown(
-        dir.to_str().unwrap(),
-        &uri,
-        &["public".to_string()],
-        false,
-    )
-    .await
-    .expect("engine init failed");
+    let engine =
+        DataFusionEngine::new_with_pushdown(dir.to_str().unwrap(), &pg_sources(&uri), false)
+            .await
+            .expect("engine init failed");
 
     let batches = engine
         .query("SELECT id, category FROM pushdown_items WHERE id > 995")
@@ -272,17 +279,13 @@ async fn pushed_and_unpushed_results_are_identical() {
 
     let dir_on = temp_parquet_dir("diff_on");
     let dir_off = temp_parquet_dir("diff_off");
-    let engine_on = DataFusionEngine::new(dir_on.to_str().unwrap(), &uri, &["public".to_string()])
+    let engine_on = DataFusionEngine::new(dir_on.to_str().unwrap(), &pg_sources(&uri))
         .await
         .expect("engine (pushdown on) init failed");
-    let engine_off = DataFusionEngine::new_with_pushdown(
-        dir_off.to_str().unwrap(),
-        &uri,
-        &["public".to_string()],
-        false,
-    )
-    .await
-    .expect("engine (pushdown off) init failed");
+    let engine_off =
+        DataFusionEngine::new_with_pushdown(dir_off.to_str().unwrap(), &pg_sources(&uri), false)
+            .await
+            .expect("engine (pushdown off) init failed");
 
     let queries = [
         // pushable comparisons
@@ -348,7 +351,7 @@ async fn hostile_predicate_value_is_neutralized() {
     seed(&client).await;
 
     let dir = temp_parquet_dir("hostile");
-    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &pg_sources(&uri))
         .await
         .expect("engine init failed");
 

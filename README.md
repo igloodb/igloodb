@@ -137,6 +137,7 @@ use std::time::Duration;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use igloo::cache_layer::Cache;
 use igloo::cdc_sync::CdcListener;
+use igloo::config::PostgresSource;
 use igloo::datafusion_engine::DataFusionEngine;
 
 #[tokio::main]
@@ -145,10 +146,15 @@ async fn main() -> igloo::errors::Result<()> {
     let cache = Cache::new(1024, Duration::from_secs(300));
     let cdc = CdcListener::new("./dummy_iceberg_cdc");
 
+    // One entry per PostgreSQL database; each becomes a catalog, so its
+    // tables are queryable as <source>.<schema>.<table>.
     let engine = DataFusionEngine::new(
         "./dummy_iceberg_cdc/",
-        "postgres://postgres:postgres@localhost:5432/mydb",
-        &["public".to_string()],
+        &[PostgresSource::new(
+            "postgres",
+            "postgres://postgres:postgres@localhost:5432/mydb",
+            vec!["public".to_string()],
+        )],
     )
     .await?;
 
@@ -175,6 +181,40 @@ async fn main() -> igloo::errors::Result<()> {
 }
 ```
 
+## 🗂️ Multiple PostgreSQL sources
+
+Igloo federates over any number of PostgreSQL databases. Declare one `[[sources]]` entry per database in `igloo.toml` — no Rust code changes:
+
+```toml
+parquet_path = "./dummy_iceberg_cdc/"
+cdc_path = "./dummy_iceberg_cdc"
+
+[[sources]]
+name = "orders_db"
+uri = "postgres://igloo@orders-host:5432/orders"
+schemas = ["public", "billing"]   # optional; defaults to ["public"]
+tables = ["orders", "customers"]  # optional allowlist; defaults to every base table
+
+[[sources]]
+name = "crm"
+# Omit `uri` and set IGLOO_SOURCE_CRM_URI instead to keep credentials out of the file.
+```
+
+Every discovered table is registered twice:
+
+*   **canonically**, as `<source>.<schema>.<table>` (`orders_db.billing.invoices`) — always unambiguous, and what `SHOW TABLES` / `information_schema` report to BI tools; and
+*   as an **unqualified alias** (`invoices`) for ergonomics. Aliases are resolved deterministically in configured order — bare name, then `schema__table`, then `source__schema__table` — so the first configured source keeps the short names and nothing is ever silently shadowed.
+
+Cross-source joins are ordinary SQL:
+
+```sql
+SELECT o.id, c.email
+FROM orders_db.public.orders o
+JOIN crm.public.contacts c ON c.id = o.contact_id;
+```
+
+The single-source keys (`postgres_uri`/`postgres_schemas`, `DATABASE_URL`, `IGLOO_POSTGRES_URI`) remain supported as shorthand for one source named `postgres`. Setting both forms in the config file is a startup error rather than a guess; per-source environment overrides (`IGLOO_SOURCE_<NAME>_URI`, `IGLOO_SOURCE_<NAME>_SCHEMAS`) are how you inject credentials.
+
 ## 🧪 Development
 
 ```sh
@@ -189,6 +229,8 @@ Integration tests exercise the federated Parquet ⋈ PostgreSQL path against a l
 IGLOO_TEST_POSTGRES_URI=postgres://postgres:postgres@localhost:5432/igloo_test \
     cargo test --test postgres_federation
 ```
+
+The multi-source suite (`cargo test --test multi_source`) additionally creates a second database on the same server, so the configured user needs `CREATE DATABASE`.
 
 ### Filter pushdown to PostgreSQL
 
@@ -225,6 +267,9 @@ Igloo's behavior is controlled by a small set of required settings. They can com
     *   **Purpose:** Comma-separated list of PostgreSQL schemas (namespaces) to introspect. Every base table found in these schemas is registered automatically by name (views are skipped); columns whose type has no Arrow mapping are dropped with a warning (config file key: `postgres_schemas`, a TOML array). Optional — defaults to `public`. Must list at least one schema.
     *   **Example:** `public,analytics`
 
+*   `IGLOO_SOURCE_<NAME>_URI` / `IGLOO_SOURCE_<NAME>_SCHEMAS`:
+    *   **Purpose:** Override the connection string / schema list of the `[[sources]]` entry named `<name>` (uppercased, e.g. `IGLOO_SOURCE_ORDERS_DB_URI` for `name = "orders_db"`). This is how credentials stay out of the config file in a multi-source deployment — see [Multiple PostgreSQL sources](#multiple-postgresql-sources).
+
 *   `IGLOO_CONFIG`:
     *   **Purpose:** Optional path to a TOML config file providing the settings above (see `igloo.example.toml`). Environment variables override file values. If unset, `./igloo.toml` is used when present.
 
@@ -254,9 +299,10 @@ Igloo relies on ADBC C++ drivers (such as the PostgreSQL driver) via Rust's Fore
 ## ✅ Features
 
 - ⚡ Fast SQL Execution with Apache DataFusion
-- 🧊 Smart Result Caching keyed by canonicalized SQL (parse round-trip)
+- 🧠 Smart Result Caching keyed by canonicalized SQL (parse round-trip)
+- 🗂️ Multi-source federation: several PostgreSQL databases, each queryable as `<source>.<schema>.<table>`
 - 🔄 CDC-Driven Invalidation from JSON event files (Iceberg planned)
-- 🔌 Join Support for Postgres + Arrow datasets
+- 🔌 Join Support for Postgres + Arrow datasets (including joins across sources)
 - ⬇️ Conservative filter pushdown to PostgreSQL (exactly-equivalent predicates only)
 - 📈 Crypto market metrics over OHLCV data (VWAP, SMA, rolling volatility, max drawdown) via `igloo crypto-demo`
 - 🧪 Designed for extensibility (remote cache, metrics, etc.)

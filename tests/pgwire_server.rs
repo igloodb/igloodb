@@ -18,8 +18,19 @@ use tokio_postgres::{NoTls, SimpleQueryMessage};
 
 use igloo::cache_layer::Cache;
 use igloo::cdc_sync::CdcListener;
+use igloo::config::PostgresSource;
 use igloo::datafusion_engine::DataFusionEngine;
 use igloo::server::serve_with_listener;
+
+/// The single PostgreSQL source these tests federate over: every base table
+/// in the `public` schema of the test database.
+fn pg_sources(uri: &str) -> Vec<PostgresSource> {
+    vec![PostgresSource::new(
+        "postgres",
+        uri,
+        vec!["public".to_string()],
+    )]
+}
 
 fn write_parquet_fixture(dir: &std::path::Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
@@ -77,7 +88,7 @@ async fn pgwire_client_queries_and_survives_errors() {
         .unwrap();
 
     let engine = Arc::new(
-        DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
+        DataFusionEngine::new(dir.to_str().unwrap(), &pg_sources(&uri))
             .await
             .expect("engine init failed"),
     );
@@ -163,7 +174,7 @@ async fn cdc_event_refreshes_cached_pgwire_results() {
         .unwrap();
 
     let engine = Arc::new(
-        DataFusionEngine::new(parquet_dir.to_str().unwrap(), &uri, &["public".to_string()])
+        DataFusionEngine::new(parquet_dir.to_str().unwrap(), &pg_sources(&uri))
             .await
             .unwrap(),
     );
@@ -259,7 +270,7 @@ async fn extended_protocol_prepared_statements_and_parameters() {
         .unwrap();
 
     let engine = Arc::new(
-        DataFusionEngine::new(parquet_dir.to_str().unwrap(), &uri, &["public".to_string()])
+        DataFusionEngine::new(parquet_dir.to_str().unwrap(), &pg_sources(&uri))
             .await
             .unwrap(),
     );
@@ -387,7 +398,7 @@ async fn concurrent_load_50_connections_mixed_queries() {
         .unwrap();
 
     let engine = Arc::new(
-        DataFusionEngine::new(parquet_dir.to_str().unwrap(), &uri, &["public".to_string()])
+        DataFusionEngine::new(parquet_dir.to_str().unwrap(), &pg_sources(&uri))
             .await
             .unwrap(),
     );

@@ -19,7 +19,18 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
 use tokio_postgres::NoTls;
 
+use igloo::config::PostgresSource;
 use igloo::datafusion_engine::DataFusionEngine;
+
+/// The single PostgreSQL source these tests federate over: every base table
+/// in the `public` schema of the test database.
+fn pg_sources(uri: &str) -> Vec<PostgresSource> {
+    vec![PostgresSource::new(
+        "postgres",
+        uri,
+        vec!["public".to_string()],
+    )]
+}
 
 fn write_parquet_fixture(dir: &std::path::Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
@@ -79,7 +90,7 @@ async fn federated_join_returns_matching_row_from_both_sources() {
     write_parquet_fixture(&dir);
     seed_postgres(&uri).await;
 
-    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &uri, &["public".to_string()])
+    let engine = DataFusionEngine::new(dir.to_str().unwrap(), &pg_sources(&uri))
         .await
         .expect("engine initialization against live Postgres failed");
 

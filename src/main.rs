@@ -38,12 +38,7 @@ async fn main() -> Result<()> {
     let cdc = CdcListener::new(&config.cdc_path);
 
     log::info!("Initializing DataFusionEngine...");
-    let engine = DataFusionEngine::new(
-        &config.parquet_path,
-        config.postgres_uri.expose(),
-        &config.postgres_schemas,
-    )
-    .await?;
+    let engine = DataFusionEngine::new(&config.parquet_path, &config.postgres_sources).await?;
     log::info!("DataFusionEngine initialized successfully.");
 
     let query = "SELECT i.user_id, i.data, p.extra_info FROM iceberg i JOIN pg_table p ON i.user_id = p.user_id WHERE i.user_id = 42";
@@ -62,9 +57,11 @@ async fn main() -> Result<()> {
         println!("Cache miss. Executed with DataFusion:\n{}", result_str);
     }
 
-    // Connect to Postgres using ADBC and run a test query
+    // Connect to Postgres using ADBC and run a test query against the
+    // primary (first configured) source.
     let sql_adbc_test = "SELECT 1 AS test_col";
-    adbc_postgres::adbc_postgres_query_example(config.postgres_uri.expose(), sql_adbc_test).await?;
+    adbc_postgres::adbc_postgres_query_example(config.primary_source().uri.expose(), sql_adbc_test)
+        .await?;
     log::info!(target: "igloo_main", "ADBC test query succeeded! sql: {}", sql_adbc_test);
 
     log::info!("Starting CDC sync...");
@@ -87,14 +84,8 @@ async fn serve(config: config::Config) -> Result<()> {
         }
     };
     log::info!("Initializing DataFusionEngine for serve mode...");
-    let engine = Arc::new(
-        DataFusionEngine::new(
-            &config.parquet_path,
-            config.postgres_uri.expose(),
-            &config.postgres_schemas,
-        )
-        .await?,
-    );
+    let engine =
+        Arc::new(DataFusionEngine::new(&config.parquet_path, &config.postgres_sources).await?);
 
     let cache = Arc::new(Cache::new(config.cache_max_entries, config.cache_ttl));
     let cdc = Arc::new(CdcListener::new(&config.cdc_path));

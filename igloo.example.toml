@@ -7,9 +7,14 @@
 #   IGLOO_CDC_PATH                overrides cdc_path
 #   DATABASE_URL / IGLOO_POSTGRES_URI  override postgres_uri
 #                                 (DATABASE_URL wins when both are set)
+#   IGLOO_SOURCE_<NAME>_URI       overrides the uri of the [[sources]] entry
+#                                 named <name> (uppercased), e.g.
+#                                 IGLOO_SOURCE_ORDERS_DB_URI
+#   IGLOO_SOURCE_<NAME>_SCHEMAS   likewise for its schemas (comma-separated)
 #
-# Every value below is required (via the file or the environment). Igloo
-# fails fast at startup if any is missing — there are no built-in defaults.
+# Every value below is required (via the file or the environment) unless
+# marked optional. Igloo fails fast at startup if any is missing — there are
+# no built-in defaults for the required ones.
 
 # Directory of Parquet files registered as the `iceberg` table.
 parquet_path = "./dummy_iceberg_cdc/"
@@ -17,6 +22,13 @@ parquet_path = "./dummy_iceberg_cdc/"
 # Directory watched for CDC event files (JSON); any event invalidates the cache.
 cdc_path = "./dummy_iceberg_cdc"
 
+# --- PostgreSQL sources ------------------------------------------------------
+#
+# Two equivalent forms; pick ONE (setting both in the file is an error).
+#
+# 1) Single-source shorthand. The source is named `postgres`, so its tables
+#    are queryable as `postgres.<schema>.<table>` (and by their bare names).
+#
 # PostgreSQL connection string: URI or key-value form.
 # Prefer setting this via DATABASE_URL / IGLOO_POSTGRES_URI instead of
 # committing credentials to a file.
@@ -27,6 +39,26 @@ postgres_uri = "postgres://postgres:postgres@localhost:5432/mydb"
 # defaults to ["public"]. Must list at least one schema. Env override:
 # IGLOO_POSTGRES_SCHEMAS as a comma-separated list (e.g. "public,analytics").
 # postgres_schemas = ["public"]
+
+# 2) Multi-source form: one [[sources]] entry per PostgreSQL database. Each
+#    becomes a catalog, so its tables are queryable as
+#    `<source>.<schema>.<table>`; unqualified names also work when they are
+#    unambiguous (the first configured source wins a name collision).
+#
+#    Names must be lowercase letters/digits/underscores starting with a
+#    letter, so they can be written unquoted in SQL.
+#
+# [[sources]]
+# name = "orders_db"
+# # Omit `uri` and supply IGLOO_SOURCE_ORDERS_DB_URI to keep credentials out
+# # of the file entirely.
+# uri = "postgres://postgres:postgres@localhost:5432/orders"
+# schemas = ["public", "billing"]   # optional; defaults to ["public"]
+# tables = ["orders", "customers"]  # optional allowlist; defaults to all
+#
+# [[sources]]
+# name = "crm"
+# uri = "postgres://postgres:postgres@crm-host:5432/crm"
 
 # Address for the pgwire server started by `igloo serve` (env override:
 # IGLOO_LISTEN_ADDR). Optional — only required in serve mode. The endpoint
