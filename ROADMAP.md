@@ -1,312 +1,325 @@
-# 🍙 Igloo Roadmap: From Proof-of-Concept to 10x Value
+# Igloo roadmap
 
-**Broad connectivity update:** 2026-10-27. The goal is access across databases,
-warehouses and lakehouses through native adapters, compatible ADBC drivers,
-open-format snapshots and planned replication/bridge integrations. The preview
-now includes generic ADBC discovery/streaming, verified SQLite/PostgreSQL driver
-tests, named Parquet schemas and connector discovery for agents. Additional
-database certification, real Iceberg reads, OLake interoperability and bridges
-are next priorities; they are not already implemented. See [connector strategy](docs/CONNECTORS.md).
+Updated **27 October 2026**. Igloo is an experimental, single-node SQL federation
+engine built with Rust, DataFusion and Arrow. The goal is to query data across
+databases, warehouses and lakehouses through familiar SQL clients and simple
+interfaces for developers and their AI agents.
 
-**Agent strategy update:** 2026-10-27. The historical baseline below predates
-several implemented features; it is not a description of the current runtime.
-Igloo now includes pgwire, multi-source PostgreSQL catalogs, bounded Arrow caching,
-filter pushdown and integration tests, plus native stdio MCP and read-only JSON
-agent commands in this branch. Read the [market analysis and product priorities](docs/MARKET_ANALYSIS.md)
-and [agent guide](docs/AGENTS.md) for the current agent direction. Near-term
-priorities are configurable Parquet schemas, source timeouts/cancellation and
-memory accounting, reproducible agent evaluations, and easier installation.
+Broad database support is the direction. Each integration needs evidence for its
+types, authentication, query semantics and failure behavior before it is called
+supported. Live database access and replication into open table formats are
+separate capabilities.
 
-**Original roadmap status:** Draft for review · **Baseline date:** 2026-07-06
+## Current status
 
----
+This roadmap distinguishes the code on `main` from unreleased work:
 
-## 1. Where the codebase stands today
+- **Main:** the baseline reviewed is
+  [`1633204`](https://github.com/igloodb/igloodb/commit/163320482d98bc3d6c49eb85acb0f511461a8284).
+- **Preview:** [PR #32](https://github.com/igloodb/igloodb/pull/32), reviewed at
+  [`b5a210d`](https://github.com/igloodb/igloodb/commit/b5a210d54a2e78a9a8c9497e2476061aad771d36).
+  These features are implemented and tested on that branch, but are not merged
+  into `main` or available as a tagged release. The PR remains draft while
+  dependency advisory failures are addressed.
+- **Planned:** unchecked work below. A checked item is labeled **Preview** when
+  its implementation is not on `main`.
 
-An honest assessment of the current state (~865 lines of Rust across 7 modules, as of the build-fix/cleanup merged in PR #12), because the roadmap only makes sense against it:
+| Area | On main | Additional work in the preview |
+| --- | --- | --- |
+| SQL service | `igloo serve`, PostgreSQL simple/extended protocol, typed prepared statements and concurrent connections | Native stdio MCP and noninteractive JSON commands |
+| Catalogs | Multiple PostgreSQL sources, startup introspection, qualified names and collision-safe aliases | Generic ADBC metadata discovery and named local Parquet tables with inferred schemas |
+| Database coverage | Native PostgreSQL with integration suites | SQLite/PostgreSQL ADBC 1.7.0 on Linux x86_64; PostgreSQL 15; cross-connector and Parquet joins |
+| Query execution | DataFusion federation and conservative PostgreSQL filter pushdown | ADBC projection and streamed Arrow batches; filters and joins stay in DataFusion |
+| Cache | Thread-safe Arrow batches, canonicalized SQL keys, entry-count LRU bound, TTL and counters | Agent queries bypass cache; no additional freshness guarantee |
+| Change events | Local JSON-file polling, event deduplication and whole-cache invalidation | No transaction-log CDC or OLake integration |
+| Configuration | Validated TOML plus environment overrides and secret redaction | PostgreSQL optional when ADBC or named Parquet sources are configured; driver options can reference environment variables |
+| Quality gates | Unit/live PostgreSQL/pgwire suites, MSRV, coverage, Clippy and dependency auditing configured in CI | 175 tests passed with both ADBC drivers enabled; strict Clippy cleanup and agent/connector integration suites |
+| Iceberg | A legacy table named `iceberg` reads local Parquet with a fixed schema | Named Parquet removes the fixed-schema restriction for that route; real Iceberg semantics remain unimplemented |
 
-| Area | Current reality | Reference |
-|---|---|---|
-| Process model | A binary that executes **one hardcoded query** and exits. There is no server, no client interface, no way for a second query to arrive. | `src/main.rs:36` |
-| Cache | `HashMap<String, String>` mapping the exact query text to a **pretty-printed string** of the result. No TTL, no eviction, no memory bound, not shared across threads, lost on exit. A cache hit requires a byte-identical query string. | `src/cache_layer.rs:8` |
-| CDC | File-based simulation: reads JSON event files from a local directory and, if any exist, conservatively **clears the entire cache**. No per-table granularity; remote (S3/Iceberg) CDC is an unimplemented warning. | `src/cdc_sync.rs:27-55` |
-| Iceberg | Not actually Iceberg — a DataFusion `ListingTable` over loose Parquet files with a hardcoded two-column schema. No catalog, no snapshots, no schema evolution. | `src/datafusion_engine.rs:30-48` |
-| Postgres federation | A single hardcoded table (`my_pg_table`) with a hardcoded schema. `scan()` pushes **LIMIT** down and quotes identifiers, but there is **no filter or aggregate pushdown**; every matching row is buffered in memory and rebuilt into Arrow arrays row-by-row. | `src/postgres_table.rs:75-90` |
-| ADBC | A demonstration function that runs `SELECT 1` and prints the result. Not wired into query execution. | `src/adbc_postgres.rs:15` |
-| Configuration | Env vars with silent fallbacks to localhost defaults (violates fail-fast). | `src/main.rs:26-31` |
-| Tests | 11 hermetic unit tests (cache semantics, CDC sync, identifier quoting, a Parquet query through DataFusion). **No integration tests** against a live Postgres — the federation path is untested. | `src/cache_layer.rs:43`, `src/cdc_sync.rs:80` |
-| Dependencies | Recently modernized: DataFusion 44 / Arrow 53 unified across the tree, MSRV 1.80.1, unused deps removed. Still a single crate, no license/advisory auditing, and DataFusion 44 will keep drifting behind without a policy for tracking releases. | `Cargo.toml` |
+Pgwire is currently unauthenticated plaintext. There is no shared transaction or
+snapshot across independent sources. Cache capacity is bounded by entries, not
+bytes. ADBC streaming does not bound driver batch sizes or interrupt blocked
+native calls. These remain engineering work, not production guarantees.
 
-**The one-sentence gap:** Igloo's promise is *"sub-millisecond SQL over live operational databases, kept fresh automatically by CDC"* — but today nothing can connect to it, the cache can't hold data (only display strings), and the CDC loop doesn't exist.
+Preview references: [agent contract](https://github.com/igloodb/igloodb/blob/b5a210d54a2e78a9a8c9497e2476061aad771d36/docs/AGENTS.md),
+[connector strategy and evidence](https://github.com/igloodb/igloodb/blob/b5a210d54a2e78a9a8c9497e2476061aad771d36/docs/CONNECTORS.md),
+and [market analysis](https://github.com/igloodb/igloodb/blob/b5a210d54a2e78a9a8c9497e2476061aad771d36/docs/MARKET_ANALYSIS.md).
 
-## 2. What "10x more valuable" means
+## Immediate priorities
 
-The 10x does not come from polishing any single module. It comes from crossing three thresholds, in order:
+| Order | Deliverable | Evidence needed to finish |
+| --- | --- | --- |
+| 1 | Make the preview ready to merge and release | Resolve dependency advisories, retain Rust 1.88 compatibility, pass required checks and publish reproducible setup instructions |
+| 2 | Certify more live database connectors | Real driver/server tests, documented types/authentication, failure tests and at least one cross-source join per certified integration |
+| 3 | Improve agent setup and execution limits | Tested client configurations, stable JSON errors, installation path, source-side timeouts and explicit cancellation/resource behavior |
+| 4 | Read replicated lakehouse data correctly | Iceberg catalog/object-store integration, snapshot/delete/schema correctness and an OLake interoperability test |
+| 5 | Make freshness observable and enforceable | Source watermarks, dependency-aware invalidation and tested behavior during lag, disconnects and restarts |
 
-1. **Usable at all** — a long-running server that real clients (BI tools, `psql`, Python) can send arbitrary SQL to. Without this the value is zero regardless of internals; with it, everything else compounds.
-2. **The differentiator works** — CDC-driven cache freshness is the reason Igloo exists instead of "Postgres + a Redis string cache". Real logical-replication ingestion plus dependency-aware invalidation turns the cache from "stale answers fast" into "correct answers fast", which is the entire pitch.
-3. **Trustworthy in production** — observability, security, bounded memory, and tests. This converts "cool demo" into "thing a team is allowed to deploy".
+Database certification, agent usability and the Iceberg reader can progress
+independently once the release foundation is sound. A workspace split or a
+distributed runtime is not a prerequisite for these deliverables. There are no
+committed dates or unmeasured speedup promises in this roadmap.
 
-The roadmap below is organized into five phases. Each feature has explicit acceptance criteria; a feature is not "done" until every criterion passes in CI or is demonstrated in a documented runbook.
-
----
-
-## Phase 0 — Foundation (prerequisite for everything)
-
-> Goal: make change safe. No new user-facing capability, but every later phase depends on this.
+## Phase 0 — Foundation
 
 ### F0.1 Test harness and CI quality gates
 
-Build on the unit-test baseline from PR #12 (cache, CDC sync, identifier quoting, Parquet-path query): add integration tests against real services via `testcontainers-rs` — the Postgres federation path currently has zero test coverage — and CI that fails on regressions.
-
-**Acceptance criteria**
-- [ ] `cargo test` runs unit tests covering: cache get/set/eviction semantics (partially in place), error-type conversions, and SQL-to-table-dependency extraction (once F2.2 lands, tests extend to it).
-- [x] An integration test suite executes a federated query (Parquet ⋈ Postgres) against a live PostgreSQL and asserts on the Arrow results — not on log output. *(Implemented as `tests/postgres_federation.rs`, gated on `IGLOO_TEST_POSTGRES_URI` so plain `cargo test` stays hermetic; CI provides a Postgres service container. Testcontainers can replace the gate later if per-test isolation is needed.)*
-- [x] CI runs fmt + clippy (`-D warnings`) + unit tests **and** the integration suite on every PR (integration runs as a separate job with a Postgres service).
-- [x] A regression test exists for every bug fixed from this point forward (enforced by the Testing Requirements section in `CONTRIBUTING.md`).
-- [ ] Code coverage is measured (e.g. `cargo-llvm-cov`) and reported on PRs; no hard threshold initially, but the trend is visible. *(A non-blocking `coverage` CI job is in place; tick once it proves itself and the trend is actually being watched.)*
+- [x] Unit tests and live PostgreSQL suites cover federation, catalogs, pushdown,
+  multi-source queries and pgwire, including a 50-connection load test.
+- [x] Formatting, strict Clippy, rustdoc, tests, MSRV and coverage jobs are defined
+  in CI. A configured gate does not imply the current run is passing.
+- [x] **Preview:** agent/MCP contract tests and real SQLite/PostgreSQL ADBC tests
+  cover discovery, quoted identifiers, NULLs, projections, counts and joins.
+- [ ] Require configured integration jobs to fail when a required service or
+  driver is unavailable, and distinguish skipped tests from executed coverage.
+- [ ] Expand differential/type/failure corpora as each connector is certified;
+  record versions, fixtures and commands with results.
 
 ### F0.2 Workspace layout and dependency hygiene
 
-PR #12 already did the rescue work (DataFusion 39→44, one Arrow major across the tree, MSRV 1.80.1, dead deps removed). What remains is structural: split the crate into a workspace (`igloo-core`, `igloo-server`, `igloo-cache`, `igloo-connectors`) so components are testable and reusable in isolation, and put dependency currency on a policy instead of heroics.
-
-**Acceptance criteria**
-- [ ] The build is a Cargo workspace; `igloo-cache` and `igloo-connectors` compile and pass their tests without the server crate.
-- [x] MSRV is enforced in CI (a dedicated MSRV job): build + test run on exactly the toolchain named by `package.rust-version`, read dynamically from `Cargo.toml`. MSRV was raised to 1.88 — the true floor of the locked dependency graph (`ar_archive_writer 0.5.2` requires 1.88), verified empirically; the previously declared 1.80.1 could not even parse the lockfile. *(The documented policy for how closely DataFusion/Arrow track upstream releases remains open.)*
-- [x] `cargo deny` (or equivalent) runs in CI for license/advisory checks; the Dependabot findings currently open against main are resolved or explicitly waived. *(All five vulnerabilities fixed via `cargo update`; the unmaintained `paste` advisory is waived in `deny.toml` with rationale until the next arrow/datafusion major.)*
-- [ ] Behavior parity across any future major upgrade: the federated join demo (Parquet ⋈ Postgres) produces identical results, proven by an integration test that exists *before* the upgrade lands (depends on F0.1).
+- [x] CI reads the declared MSRV from `Cargo.toml`; the current minimum is Rust 1.88.
+- [x] License, advisory and dependency-source checks are configured in `deny.toml`.
+- [ ] Resolve current transitive dependency advisories before releasing the
+  preview. Do not mark dependency health complete merely because auditing exists.
+- [ ] Establish an upgrade policy for DataFusion, Arrow, ADBC and the MCP SDK,
+  preserving federation results and the agent response contract across upgrades.
+- [ ] Split into workspace crates when connector reuse or build isolation justifies
+  it; preserve public APIs and tests rather than blocking features on a refactor.
 
 ### F0.3 Fail-fast configuration system
 
-Replace scattered `env::var(...).unwrap_or_else(localhost)` with a typed config (config file + env overrides, e.g. `figment` or `config`): sources, cache limits, listen addresses, credentials via env/secret refs only.
+- [x] TOML/environment configuration, startup validation, example configuration
+  and redacted secrets replace silent localhost fallbacks.
+- [x] **Preview:** validate ADBC/named Parquet configurations, unique catalog
+  names, trusted driver paths, exact allowlists and environment-bound options.
+- [ ] Keep configuration examples and error messages reproducible across supported
+  installation methods; ensure failures never expose source credentials.
 
-**Acceptance criteria**
-- [x] Starting Igloo without required configuration (e.g. no data sources defined) exits non-zero with a message naming the missing key — no silent localhost defaults.
-- [x] A commented `igloo.example.toml` documents every option; the README configuration reference covers it.
-- [x] Secrets (DB passwords) are redacted by the `Secret` config type in `Debug`/`Display`/logs, verified by a unit test; docs steer credentials to env vars rather than checked-in files.
-- [x] Invalid values (bad connection string, empty paths) fail at startup with a validation error, covered by unit tests. *(Extends to numeric limits like cache sizes when those options appear in F1.4.)*
-
----
-
-## Phase 1 — Become a real database service (the first 10x threshold)
-
-> Goal: anyone can point a SQL client at Igloo and query their data. This phase converts Igloo from a demo binary into a product.
+## Phase 1 — SQL service and catalogs
 
 ### F1.1 Long-running query server with PostgreSQL wire protocol
 
-Implement a server daemon speaking the Postgres wire protocol (via `pgwire`), so `psql`, BI tools (Metabase, Grafana, Superset), and every Postgres driver in every language work with zero client-side changes. This is the highest-leverage single feature in the roadmap: it multiplies the audience from "people willing to edit `main.rs`" to "anyone with a SQL client".
-
-> **Status:** walking skeleton landed (`igloo serve`, `src/server.rs`): simple-query protocol over plaintext TCP, arbitrary SQL → DataFusion, per-query errors keep the connection alive, integration-tested with tokio-postgres as the client. **Extended query protocol landed:** clients can parse/bind/execute prepared statements with `$1...$n` parameters in either text or binary encoding; parameter OIDs the client leaves unspecified are inferred by DataFusion from query context at plan time (`describe_query`), and result columns honor the portal's requested format (tokio-postgres's default binary results work). Zero-parameter statements share the cache with the simple path. A 50-connection concurrent-load integration test and a hostile-input property test (random bytes through normalization, cacheability gating, and parameter decoding) both pass. Still open before the criteria below pass: auth (deferred with F4.2), SIGTERM drain of in-flight queries, `Execute` max_rows honored as a true partial fetch, and the BI-tool walkthrough.
-
-**Acceptance criteria**
-- [ ] `igloo serve` starts a daemon that listens on a configured address and serves concurrent connections until stopped; clean shutdown on SIGTERM drains in-flight queries.
-- [ ] `psql -h <igloo> -c "SELECT ..."` executes arbitrary SQL against registered sources and returns correct results, including simple/extended query protocol, prepared statements with parameters, and error responses that don't kill the connection. *(Extended query protocol with typed parameter binding landed; psql walkthrough still to be documented.)*
-- [ ] At least one mainstream BI tool (Grafana or Metabase, using its stock Postgres connector) can connect, list tables, and render a query — documented with a walkthrough.
-- [x] Concurrent-load integration test: ≥ 50 simultaneous connections issuing mixed queries complete without errors, deadlocks, or unbounded memory growth. *(tests/pgwire_server.rs `concurrent_load_50_connections_mixed_queries`, run in CI.)*
-- [ ] A malformed query returns a protocol-correct error message; the server never panics on client input (fuzz/property test over the parse path). *(Property tests cover query-text normalization/cacheability and parameter decoding; SQL parse errors surface as protocol-correct ErrorResponses — a dedicated fuzz harness is still open.)*
+- [x] Serve concurrent connections, simple/extended queries, typed parameters and
+  text/binary results, with live client integration tests.
+- [ ] Drain in-flight work on SIGTERM and test shutdown under load.
+- [ ] Honor portal partial fetch (`Execute.max_rows`) and define supported
+  transaction behavior; do not imply full PostgreSQL compatibility.
+- [ ] Document `psql` and one mainstream BI-tool walkthrough, including catalog
+  discovery and unsupported protocol features.
+- [ ] Expand protocol fuzzing and malformed-input tests. Authentication/TLS is F4.2.
 
 ### F1.2 Arrow Flight SQL endpoint
 
-For data-engineering clients (Python/pandas/Polars, JDBC Flight SQL driver), serve Arrow Flight SQL alongside pgwire. Results transfer as Arrow batches with zero serialization loss — the natural interface for an Arrow-native engine and dramatically faster for large results.
+An outbound Flight SQL driver and an inbound Flight SQL server are different
+features. An inbound endpoint remains planned.
 
-**Acceptance criteria**
-- [ ] `pyarrow.flight`/ADBC Flight SQL client can connect, run a query, and receive results as Arrow record batches whose schema matches the pgwire answer for the same query.
-- [ ] Large-result benchmark documented: fetching a ≥ 1M-row result via Flight SQL is at least 5x faster than the pgwire path for the same query.
-- [ ] Both endpoints share one query-execution and cache path (verified: a query cached via pgwire hits the cache when re-issued over Flight SQL).
+- [ ] An ADBC/Flight SQL client receives Arrow results matching pgwire for the same
+  query, including errors, NULLs and parameter behavior.
+- [ ] Endpoints share execution and applicable policy/cache behavior; stream large
+  results with backpressure and cancellation.
+- [ ] Publish a reproducible transfer benchmark with resource usage and limitations.
 
 ### F1.3 Dynamic catalog: source registration and schema introspection
 
-Kill the hardcoded schemas. Sources are declared in config (and later via SQL `CREATE EXTERNAL TABLE` / catalog API); Igloo introspects `information_schema` to discover tables and column types, mapping Postgres types to Arrow types automatically.
-
-> **Status:** first slice landed (`src/catalog.rs`): every base table in the configured `postgres_schemas` (default `public`) is discovered via `information_schema` and registered automatically with PG→Arrow type mapping. **Second slice landed — expanded type coverage to 14 types:** `uuid`, `json`, and `jsonb` now read as Utf8 (source type stamped into Arrow field metadata so scans decode the right wire format) and `timestamptz` reads as a UTC-typed timestamp (offsets normalized, distinct from naive timestamps); proven by live round-trip tests including predicates on uuid columns. **Third slice landed — multi-source catalogs:** `igloo.toml` takes any number of `[[sources]]` entries (name + URI + optional `schemas`/`tables` allowlist, with `IGLOO_SOURCE_<NAME>_URI`/`_SCHEMAS` env overrides so credentials stay out of files); each source becomes a DataFusion catalog, so every table is queryable canonically as `<source>.<schema>.<table>` (cross-source joins included) while unqualified aliases stay available through a deterministic collision ladder (`table` → `schema__table` → `source__schema__table`). `SHOW TABLES` lists all source catalogs. Proven by `tests/multi_source.rs` against **two separate PostgreSQL databases**. Unsupported columns still degrade to a logged supported-subset registration; scan SQL is schema-qualified. Still open below: `numeric` → Decimal128 (needs precision/scale plumbed through introspection, pushdown, and pgwire encoding), and schema-drift error handling.
-
-**Acceptance criteria**
-- [x] Adding a Postgres source in `igloo.toml` (name + URI + optional schema/table allowlist) makes all its tables queryable by `<source>.<schema>.<table>` name with no Rust code changes. *(`[[sources]]`; per-source catalogs; integration-tested over two databases including a cross-source join, an allowlist that excludes a sibling table, and same-named tables that must not shadow each other.)*
-- [ ] Type-mapping table covers at minimum: all int/float/numeric widths, text/varchar, bool, bytea, date, timestamp/timestamptz, uuid, json/jsonb (as Utf8 initially); unsupported types degrade to an explicit per-column error at registration, not a runtime panic. *(uuid/json/jsonb as Utf8 and timestamptz as UTC timestamp landed; `numeric` and the explicit per-column degradation contract remain.)*
-- [x] `SHOW TABLES` / `information_schema` queries against Igloo itself list the federated catalog (so BI tools can browse). *(Every source's catalog is listed with its `table_catalog`/`table_schema`/`table_name`, asserted in `tests/multi_source.rs`.)*
-- [ ] Schema drift handling: if an upstream column is dropped, the next query referencing it returns a clear "schema changed, re-register" error rather than corrupt results; covered by an integration test that ALTERs the upstream table mid-session.
+- [x] Discover native PostgreSQL tables/types at startup; support multiple named
+  source catalogs and deterministic aliases.
+- [x] **Preview:** register generic ADBC tables from metadata and infer schemas for
+  named local Parquet tables without requiring PostgreSQL.
+- [ ] Add deliberate schema refresh/DDL handling with deterministic invalidation
+  of dependent plans/cache entries; test added, renamed and removed columns.
+- [ ] Expose source capabilities and unsupported types consistently across clients.
 
 ### F1.4 A real cache: Arrow-native, plan-keyed, bounded
 
-Replace the string HashMap with a cache that stores **Arrow `RecordBatch`es** keyed by a **fingerprint of the normalized logical plan** (so `select * from t where id=42` and `SELECT *  FROM t WHERE id = 42` share an entry), with TTL, LRU eviction under a configurable memory budget, and thread-safe concurrent access (e.g. `moka`).
+- [x] Store Arrow batches in a thread-safe LRU cache with entry-count limits,
+  configurable TTL, canonicalized SQL keys and hit/miss/eviction counters.
+- [ ] Enforce cache byte budgets with measured accounting and concurrency tests.
+- [ ] Introduce semantic plan fingerprints with equivalence/non-equivalence tests;
+  never reuse results across incompatible source, schema or principal contexts.
+- [ ] Expose entry age, cache provenance and freshness policy to clients/metrics.
+- [ ] Keep agent cache bypass until access policy and freshness can be preserved.
 
-> **Status:** intermediate step landed: the cache now stores Arrow `RecordBatch`es, is thread-safe (`Arc<Cache>`), enforces a configurable max-entries LRU bound and TTL (injectable clock, tested without sleeps), keys on quote-aware whitespace-normalized SQL, and exposes hit/miss/eviction counters via `stats()`. It serves the pgwire path: `igloo serve` answers repeated SELECT/WITH statements from cache (side-effecting statements bypass it) and a background CDC polling task keeps it fresh — proven by an end-to-end integration test (cached result → upstream change + CDC event → fresh result within the poll interval). Still open for the criteria below: plan-fingerprint keying, a byte-budget (entries-count only today), metrics export, and `EXPLAIN` cache provenance.
-
-**Acceptance criteria**
-- [ ] Cache stores Arrow data; a cache hit returns batches byte-identical (schema + data) to a fresh execution, verified by an integration test. *(Storage is Arrow-native now; the integration-test assertion is still to be written.)*
-- [ ] Key is derived from the normalized/optimized logical plan: whitespace, case, and semantically-equivalent literal formatting differences hit the same entry (unit-tested with ≥ 10 equivalence pairs and ≥ 5 non-equivalence pairs).
-- [ ] Memory budget is enforced: filling the cache past `cache.max_bytes` evicts LRU entries and the process RSS stays bounded under a sustained-insert stress test.
-- [ ] Per-entry TTL and a global default TTL are configurable; an expired entry re-executes and repopulates.
-- [ ] Cache hit/miss/eviction/size are exposed as metrics (see F4.1) and via `EXPLAIN`-style output that tells the user whether a result came from cache and how old it is.
-- [ ] Concurrency: N threads hammering get/set on overlapping keys produce no torn reads or deadlocks (loom or stress test).
-
-**Phase 1 exit demo:** `docker compose up`, connect Grafana, browse tables from two configured Postgres databases, run a dashboard; second page-load is served from cache in single-digit milliseconds with a visible cache-hit metric.
-
----
-
-## Phase 2 — CDC-driven freshness (the differentiator)
-
-> Goal: the cache is not just fast but *provably fresh*. This is what no "database + Redis" stack gives you and is Igloo's reason to exist.
+## Phase 2 — Freshness and open table formats
 
 ### F2.1 Real CDC ingestion via Postgres logical replication
 
-Replace the dummy JSON reader with a CDC listener consuming Postgres logical replication (`pgoutput` protocol) per configured source: create/manage replication slots and publications, decode insert/update/delete/truncate events with table identity and transaction LSN, and survive restarts by persisting confirmed LSNs.
+Local JSON change files are a simulation/input mechanism, not transaction-log CDC.
 
-**Acceptance criteria**
-- [ ] With CDC enabled for a source, an `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE` on any published table is observed by Igloo as a decoded event (table, op, LSN) within a configurable propagation window (default target ≤ 1 s on a local network), verified by integration tests for all four op types.
-- [ ] Slot lifecycle is managed: Igloo creates the slot/publication on first run (or uses a preconfigured one), resumes from the last confirmed LSN after a restart with **no missed events** (kill-and-restart integration test with writes during downtime), and documents WAL-retention implications in ops docs.
-- [ ] Replication connection failure triggers bounded exponential-backoff reconnect; during the outage the cache degrades safely per policy (F2.2), never serves silently-stale data past its configured tolerance.
-- [ ] CDC lag (seconds and bytes behind the source LSN) is exported as a metric.
+- [ ] Decode insert/update/delete/truncate with table identity and transaction LSN.
+- [ ] Persist checkpoints and test reconnect, duplicate delivery, writes during
+  downtime and restart without missed changes.
+- [ ] Document replication permissions, slot/publication lifecycle and WAL retention.
+- [ ] Measure lag and enforce explicit cache behavior while a source is disconnected.
 
 ### F2.2 Dependency-aware cache invalidation
 
-Today any new CDC event clears the entire cache — safe, but it destroys the hit-rate under any write load. (The invalidation *loop* already runs live: serve mode polls the CDC location on `cdc_poll_seconds`, deduplicates already-seen events, and clears the cache on new ones.) Replace whole-cache clearing with plan-time extraction of the upstream tables each cached entry depends on, plus a reverse index (table → cache keys), so a CDC event for a table invalidates exactly the dependent entries.
-
-**Acceptance criteria**
-- [ ] Table-dependency extraction from the logical plan handles joins, subqueries, CTEs, and views; unit-tested against a corpus of ≥ 30 queries including the current demo join.
-- [ ] End-to-end freshness test: query result cached → row updated upstream → within the propagation window, re-issuing the query returns the new value (cache miss or refreshed entry), for both pgwire and Flight SQL paths.
-- [ ] Precision: a write to table A does **not** invalidate cached entries depending only on table B (asserted via cache metrics in the integration test).
-- [ ] A per-source staleness policy is configurable: `invalidate` (default), `serve-stale-while-revalidate` with a max-staleness bound, or `ttl-only` for sources without CDC; each mode covered by a test.
-- [ ] Every query response can report its freshness: result age and the source LSN/watermark it reflects (surfaced via `EXPLAIN` or a session variable).
+- [x] Poll local events, deduplicate observed files and clear the whole cache on new
+  events; end-to-end integration coverage exists for that behavior.
+- [ ] Extract dependencies from joins, subqueries, CTEs and views; invalidate only
+  affected entries using fully qualified source/table identities.
+- [ ] Define and test strict, bounded-staleness and TTL-only policies, including
+  source lag/disconnect behavior and the absence of a common source snapshot.
+- [ ] Return source watermarks/snapshot IDs where available; avoid a single
+  freshness timestamp that implies coordinated consistency across sources.
 
 ### F2.3 Incremental result maintenance (materialized-view refresh)
 
-For hot queries, go beyond invalidate-and-recompute: register queries as materialized views whose cached results are **incrementally updated** from CDC deltas — starting with the tractable class (filter/projection over a single table, then simple aggregations with additive updates), falling back to full recompute for everything else.
-
-**Acceptance criteria**
-- [ ] `CREATE MATERIALIZED VIEW ... WITH (refresh = incremental)` (or config equivalent) registers a view; unsupported query shapes are rejected at creation with a message stating why and falling back to `refresh = full`.
-- [ ] For a supported single-table filtered view, an upstream insert/update/delete is reflected in the view **without** re-scanning the base table (verified by observing zero upstream scan queries during refresh, e.g. via `pg_stat_statements` in the integration test).
-- [ ] For additive aggregates (COUNT/SUM/MIN-on-insert etc.), incremental refresh produces results identical to a from-scratch recompute — property-tested with randomized event streams.
-- [ ] A correctness kill-switch exists: any inconsistency detected (checksum/row-count divergence on periodic audit) demotes the view to full recompute and raises an alert metric.
+- [ ] Start with an explicitly supported query subset and compare incremental
+  results with full recomputation through inserts, updates, deletes and restarts.
+- [ ] Bound state and recovery costs; fall back to full recomputation when the
+  query shape or source capabilities cannot preserve correctness.
+- [ ] Demonstrate a measured benefit before making incremental maintenance a default.
 
 ### F2.4 First-class Iceberg tables
 
-Replace the Parquet `ListingTable` masquerading as "iceberg" with real Iceberg support via `iceberg-rust`: connect to a REST (and file-based) catalog, read tables with correct snapshot isolation, schema evolution, and partition pruning; use Iceberg's incremental snapshot diffs as a second CDC source (for lakehouse tables) feeding the same invalidation machinery as F2.2.
+Reading loose Parquet files does not implement Iceberg snapshots, manifests,
+delete files, partition transforms or schema evolution. This is a priority route
+to broader source coverage through external replication systems such as OLake.
 
-**Acceptance criteria**
-- [ ] Igloo reads an Iceberg table registered in a REST catalog (integration test against a catalog container, e.g. the reference REST image + MinIO) with results matching Spark/pyiceberg reads of the same snapshot.
-- [ ] Schema evolution (added/renamed column across snapshots) and hidden partitioning are handled correctly — queries after evolution return correct data, partition predicates prune files (verified via scan metrics).
-- [ ] Polling snapshot changes produces table-change events into the F2.2 invalidation pipeline; an upstream Iceberg append invalidates dependent cache entries within one polling interval.
-- [ ] Time travel works: `SELECT ... FOR SYSTEM_VERSION AS OF <snapshot>` (or session-variable equivalent) returns the historical snapshot.
-- [ ] The `dummy_iceberg_cdc/` fixture and its hardcoded paths are deleted; docs and compose files updated.
-
-**Phase 2 exit demo:** a dashboard over Postgres + Iceberg where an `UPDATE` in Postgres visibly changes the cached dashboard within a second — with a freshness watermark displayed — while unrelated cached queries keep their hit-rate.
-
----
+- [ ] Read a table through a supported Iceberg catalog and object store, starting
+  with a documented REST-catalog setup and credentials supplied securely.
+- [ ] Match a reference reader at a fixed snapshot through appends, overwrites,
+  position/equality deletes and column evolution; test partition pruning.
+- [ ] Pin a snapshot throughout a query and support explicit historical reads.
+- [ ] Query a table produced by OLake and compare results after snapshot load,
+  source updates/deletes, schema changes and replication restart.
+- [ ] Feed snapshot changes into freshness/invalidation without treating every
+  Iceberg snapshot change as a complete row-level CDC stream.
 
 ## Phase 3 — Query-engine depth: performance and reach
 
-> Goal: fast on cache *misses* too, and useful for more than Postgres.
-
 ### F3.1 Filter and aggregate pushdown to sources
 
-Projection and `LIMIT` are already pushed down to Postgres, but until recently every filtered query still fetched all rows and filtered locally. Implement `TableProvider::supports_filters_pushdown`, translating DataFusion `Expr`s to source SQL (safely — parameterized/quoted, never string-concatenated user values), and push simple aggregates.
-
-> **Status:** filter pushdown landed (`src/pushdown.rs`): comparisons, `IS [NOT] NULL`, `IN`/`NOT IN`, and `AND` over int/float/bool/text literals translate to upstream `WHERE` clauses, classified **Inexact** so DataFusion re-applies them locally and correctness never depends on translation. String literals are escape-tested against hostile inputs; a conservative rule prevents the unsound WHERE+LIMIT combination; a `rows_fetched` counter proves the reduction (5 vs 1000 rows on the selective-query integration test) and a 15-query differential corpus asserts pushed == unpushed results. Still open: date/timestamp/decimal literals, `OR`/`LIKE`/`BETWEEN`, aggregate pushdown, and `EXPLAIN` surfacing of what was pushed.
-
-**Acceptance criteria**
-- [ ] `SELECT c1 FROM t WHERE c2 > $x LIMIT 10` against a 10M-row upstream table transfers only rows matching the predicate (bounded by LIMIT), verified by upstream query inspection in an integration test; wall-clock improves ≥ 10x vs. the pre-pushdown baseline on the documented benchmark.
-- [ ] Expression translation is provably injection-safe: literals are bound as parameters or correctly escaped; a property test feeding hostile strings (quotes, `;`, comments) through predicates never alters upstream query structure.
-- [ ] Unsupported expressions degrade gracefully to `Inexact` pushdown (residual filter applied by DataFusion), never to wrong results — differential-tested: with and without pushdown, results are identical across the query corpus.
-- [ ] `EXPLAIN` shows what was pushed down vs. evaluated locally.
+- [x] Native PostgreSQL supports a conservative filter subset with residual
+  evaluation, quoting/escaping tests and pushed-versus-local differential tests.
+- [x] **Preview:** generic ADBC translates quoted projections and leaves filters,
+  joins and limits to DataFusion rather than assuming portable SQL semantics.
+- [ ] Extend predicates/aggregates only with database-specific type, collation,
+  NULL and limit-composition tests; unsupported operations stay local.
+- [ ] Show pushed operations and source row/byte counts in explain/telemetry;
+  measure benefits on published workloads rather than promise fixed speedups.
 
 ### F3.2 Streaming execution and memory safety
 
-Replace collect-everything-into-`MemoryExec` with streaming: upstream rows convert to Arrow batches of bounded size and flow through DataFusion's streaming operators; results stream to clients (pgwire portals / Flight streams) without full materialization; a memory pool caps per-query and global usage.
-
-**Acceptance criteria**
-- [ ] A query returning ≥ 10x available-RAM worth of rows completes (streamed to a client that discards them) with process RSS staying under the configured memory budget throughout — measured in an integration test.
-- [ ] Batch size is configurable; time-to-first-row for a large streamed result is < 1 s where the previous buffering implementation took the full scan time.
-- [ ] Queries exceeding the per-query memory limit fail with a clear resource-exhausted error, not an OOM kill; the server remains healthy for other connections.
+- [x] **Preview:** ADBC scans stream Arrow batches through a two-batch queue on
+  blocking workers; dropping the receiver stops subsequent batch consumption.
+- [ ] Stream native PostgreSQL and client output with end-to-end backpressure.
+- [ ] Enforce per-query/global memory budgets and concurrency limits, including
+  driver batches, joins, sorting and serialization; test resource-exhausted errors.
+- [ ] Configure source-side statement timeouts and implement cancellation where
+  supported. A local response timeout alone does not interrupt a blocked C call.
+- [ ] Test slow clients, abandoned queries, driver failures and repeated concurrent
+  queries while measuring memory and source work.
 
 ### F3.3 Multi-source connectors via ADBC driver manager
 
-Promote the ADBC demo into the real connector layer: a generic `AdbcTable` provider so MySQL, SQL Server, Snowflake, etc. work through their ADBC drivers with the same catalog, pushdown, and (where the source supports it) CDC/TTL-freshness treatment.
+Use [Columnar/dbc](https://columnar.tech/) and the
+[ADBC standard](https://arrow.apache.org/adbc/current/format/specification.html)
+for compatible database access. Use replication/open formats for additional
+sources where appropriate. ADBC itself is not a CDC protocol.
 
-**Acceptance criteria**
-- [ ] MySQL configured as a source is browsable and queryable end-to-end (testcontainers integration test), including cross-source joins (Postgres ⋈ MySQL ⋈ Iceberg).
-- [ ] Driver loading failures (missing `.so`, wrong ADBC version) produce actionable startup errors naming the driver and search path — no `unwrap` panics.
-- [ ] Connector capability matrix (pushdown level, CDC support, type coverage per source) is documented and enforced: a source lacking CDC automatically gets `ttl-only` freshness (F2.2 policy).
-- [ ] Connection pooling per source with configurable limits; pool exhaustion queues with timeout rather than erroring immediately.
-
----
+- [x] **Preview:** generic C-ABI driver loading, GetObjects/GetTableSchema discovery,
+  exact catalog/schema/table filters, secret-safe errors and Arrow result streams.
+- [x] **Preview:** SQLite/PostgreSQL ADBC 1.7.0 tests on Linux x86_64, native-to-ADBC
+  PostgreSQL joins and SQLite-to-inferred-Parquet joins.
+- [ ] Certify MySQL, SQL Server and DuckDB as initial additional targets; use real
+  services/drivers and include a cross-source join for each.
+- [ ] Expand to Snowflake, BigQuery, Redshift and Databricks, then Oracle,
+  ClickHouse, Trino/Presto, Flight SQL and other suitable drivers as test accounts
+  and distributions permit. None of these are certified by the current preview.
+- [ ] Publish driver/server/platform/authentication matrices covering decimals,
+  wide integers, timestamps, binary/nested values, NULLs, identifiers, empty
+  results, metadata, schema drift, failures and concurrent reads.
+- [ ] Add bounded connection pools and a practical driver installation/discovery
+  path; do not claim dbc manifest resolution before it exists.
+- [ ] Add native adapters or tested bridges for sources without suitable ADBC
+  drivers, including JDBC/ODBC-only systems and document databases such as MongoDB.
+  DB2/document/key-value/graph coverage requires explicit validation or a correctly
+  read replicated table; listing a source in a registry is not implementation.
 
 ## Phase 4 — Production trust: observe, secure, persist
 
-> Goal: an SRE can deploy, monitor, and debug Igloo; a security review passes.
-
 ### F4.1 Observability: metrics, tracing, query log
 
-Prometheus `/metrics` endpoint (query latency histograms by cache-hit status, cache hit/miss/eviction/bytes, CDC lag, per-source scan counts, connection counts), OpenTelemetry traces spanning parse→cache→plan→source-scan, and a structured (JSON) query log.
-
-**Acceptance criteria**
-- [ ] `/metrics` exposes at minimum: `igloo_query_duration_seconds{cache="hit|miss"}`, `igloo_cache_{hits,misses,evictions,bytes}`, `igloo_cdc_lag_seconds{source}`, `igloo_source_scan_total{source}`, `igloo_connections{protocol}` — validated by an integration test that scrapes and asserts presence after a known workload.
-- [ ] With OTLP configured, one federated cached-miss query produces a single trace containing parse, cache-lookup, plan, and per-source scan spans with correct parentage.
-- [ ] Query log records: fingerprint, principal, duration, rows, cache status, freshness watermark — and **never** logs credentials or full literal values at default verbosity (unit test greps redaction).
-- [ ] A Grafana dashboard JSON for these metrics ships in `ops/`.
+- [ ] Export query latency, cache usage/bytes, source scans, connection usage,
+  resource limits, cancellations and freshness lag with bounded metric labels.
+- [ ] Trace plan/cache/source execution and record structured query metadata with
+  credentials, literals and source data redacted by default.
+- [ ] Ship a tested operations dashboard and troubleshooting guide.
 
 ### F4.2 Authentication, authorization, TLS
 
-TLS on both endpoints; password (SCRAM) and token auth; per-principal catalog/table-level access control; secrets never logged.
-
-**Acceptance criteria**
-- [ ] Plaintext connections are refused unless `insecure = true` is explicitly configured (and logged loudly at startup).
-- [ ] pgwire supports SCRAM-SHA-256; Flight SQL supports bearer tokens; both verified in integration tests including the failure paths (bad password → clean auth error, not disconnect-with-panic).
-- [ ] Table-level grants: a principal without access to `source.schema.table` gets a permission error at plan time — including when the table is only referenced inside a view/CTE — and cache entries are **not shared across principals with different visibility** (test: user A's cached result is not served to unauthorized user B).
-- [ ] Upstream source credentials support per-source least-privilege users; docs include the minimal Postgres GRANT + replication-role setup.
+- [ ] Add authenticated/encrypted network access and scoped catalog/table policy,
+  including references through views/CTEs and cache isolation between principals.
+- [ ] Test denied access, invalid credentials, TLS failures and secret redaction.
+- [ ] Document least-privilege source roles and trusted native-driver configuration.
+- [ ] Define auth, transport and tenant boundaries before adding remote MCP. The
+  local read-only agent contract is not tenant isolation or a source sandbox.
 
 ### F4.3 Tiered / persistent cache
 
-Second cache tier on local disk (Arrow IPC or Parquet spill) so warm state survives restarts and the working set can exceed RAM; entries carry their freshness watermark so restart doesn't serve stale data past policy.
-
-**Acceptance criteria**
-- [ ] With disk tier enabled, restart + identical query = disk-tier hit (no upstream scan), verified by scan metrics; entries whose source LSN is behind the current watermark are revalidated per policy before serving.
-- [ ] Disk usage respects `cache.disk_max_bytes` with LRU eviction; corrupt/torn spill files are detected (checksum) and treated as misses, never as wrong results.
-- [ ] Benchmark documented: disk-tier hit latency vs. recompute for the benchmark workload (target ≥ 5x faster than recompute for scan-heavy queries).
+- [ ] Add optional disk storage with byte limits, corruption detection and clean
+  recovery; revalidate source/schema/freshness metadata after restart.
+- [ ] Benchmark disk hits against recomputation on a documented workload.
 
 ### F4.4 Admin surface: CLI and HTTP API
 
-`igloo-ctl` + `/admin` API: list/inspect/invalidate cache entries, list sources and their CDC lag, health/readiness endpoints, config reload for non-structural settings.
+- [ ] Provide health/readiness, source status, cache inspection/invalidation and
+  controlled config reload with stable machine-readable output.
+- [ ] Authenticate network admin endpoints and test their access boundaries.
+- [ ] Distinguish local agent query commands from a live-server administration API.
 
-**Acceptance criteria**
-- [ ] `igloo-ctl cache ls|inspect|invalidate <fingerprint|--table t>` works against a live server (covered in integration tests); invalidation by table flushes exactly the dependent entries.
-- [ ] `/healthz` (liveness) and `/readyz` (readiness: catalog loaded, sources reachable or degraded-but-serving) return correct status through startup, source outage, and shutdown sequences.
-- [ ] Admin endpoints require auth (F4.2) and are separately bindable (e.g. localhost-only by default).
+## Phase 5 — Ecosystem and scale-out
 
----
+These are directional extensions. Agent access already has a preview; distributed
+execution and lakehouse writes remain separate future projects.
 
-## Phase 5 — Ecosystem & scale-out (directional)
+### F5.1 Write-through to Iceberg
 
-Lower-confidence bets, sequenced after product-market signal from Phases 1–2. Listed with thinner criteria deliberately — they should be re-specified when reached.
+- [ ] Evaluate interoperability with an external replication system before building
+  an Igloo writer. Any writer needs checkpoint, duplicate, delete and restart
+  correctness plus validation by an independent Iceberg reader.
 
-| Feature | What / why | Headline acceptance criterion |
-|---|---|---|
-| F5.1 Write-through to Iceberg | Mirror CDC streams into Iceberg tables, making Igloo an operational→lakehouse bridge (query yesterday's data from Iceberg, this second's from cache). | CDC events land in an Iceberg table queryable by external engines (Spark/Trino) with exactly-once semantics across restarts. |
-| F5.2 Horizontal read scale-out | Multiple Igloo replicas sharing invalidation via a gossip/bus channel; consistent-hash cache partitioning. | N replicas behind a LB serve a workload with a global cache hit-rate ≥ 90% of single-node, and an upstream write invalidates on all replicas within the propagation window. |
-| F5.3 Cost-based cache admission & prewarming | Learn which query fingerprints are worth caching/materializing from the query log; auto-suggest or auto-create incremental MVs (F2.3) for hot patterns. | On a replayed real workload, auto-admission achieves ≥ 80% of the hit-rate of an oracle policy while caching ≤ 50% of the bytes of cache-everything. |
-| F5.4 MCP / LLM interface | Expose the catalog + query + freshness metadata via an MCP server so AI agents can query federated data with staleness guarantees. | An MCP client can list tables, run a query, and receive results plus freshness watermark; write operations are refused. |
+### F5.2 Horizontal read scale-out
 
----
+- [ ] Design shared invalidation, authorization and consistency boundaries; prove
+  correctness and measured capacity gains under upstream writes and node failure.
 
-## Sequencing, dependencies, and effort
+### F5.3 Cost-based cache admission and prewarming
 
-```mermaid
-flowchart LR
-    P0["Phase 0<br/>Foundation<br/>(~2-3 wk)"] --> P1["Phase 1<br/>Real service<br/>(~8-10 wk)"]
-    P1 --> P2["Phase 2<br/>CDC freshness<br/>(~10-12 wk)"]
-    P1 --> P3["Phase 3<br/>Engine depth<br/>(~6-8 wk)"]
-    P2 --> P4["Phase 4<br/>Production trust<br/>(~6-8 wk)"]
-    P3 --> P4
-    P4 --> P5["Phase 5<br/>Ecosystem/scale"]
-```
+- [ ] Compare admission/prewarming with simple policies on a replayable workload,
+  measuring memory, source work and hit rate without weakening freshness.
 
-- Estimates assume 1–2 engineers and include tests/docs; they are calibrated to the current codebase size (small enough that rewrites are cheaper than refactors in most modules).
-- **Critical path to the 10x claim:** F0.1 → F0.2 → F1.1 → F1.3 → F1.4 → F2.1 → F2.2. Everything else can flex around it.
-- Phases 2 and 3 can proceed in parallel after Phase 1 if staffing allows; F3.1 (pushdown) is the single biggest cache-*miss* latency win and is a strong candidate to pull forward.
-- Every phase ends with a demoable milestone (listed at each phase's end) — ship and gather feedback per phase, not at the end.
+### F5.4 MCP / LLM interface
 
-## Suggested immediate next steps (this month)
+- [x] **Preview:** official Rust MCP SDK with stdio tools `igloo_capabilities`,
+  `igloo_connectors`, `igloo_schema`, `igloo_explain` and `igloo_query`.
+- [x] **Preview:** shared CLI/MCP logical-plan validation, read-only query policy,
+  row/time/response limits, exact integer/decimal strings, explicit NULLs,
+  truncation metadata, structured errors and a service-free demo.
+- [x] **Preview:** setup/contract documentation and machine-readable website guides
+  (`llms.txt`, Markdown and a query skill) with a pinned source checkout.
+- [ ] Publish an installable release and tested configurations for representative
+  coding-agent clients; measure time from installation to a correct first query.
+- [ ] Run reproducible evaluations for discovery, qualified SQL, cross-source
+  joins, unsupported operations, prompt-injection content and recovery from errors.
+- [ ] Add source freshness/provenance to results when those guarantees exist.
+  Keep caching, cancellation and coordinated-snapshot limitations explicit.
 
-1. **F0.1** — land the testcontainers integration suite with a first test freezing today's federated-join behavior; the unit-test baseline from PR #12 exists, but the Postgres path is still unverified end-to-end.
-2. **F0.2 + F0.3** — workspace split, `cargo deny` (clearing the open Dependabot findings), and the fail-fast config system in one PR series.
-3. **Spike F1.1** — a `pgwire` walking skeleton (auth-less, localhost) proving arbitrary SQL → DataFusion → results over the wire; this de-risks the largest Phase 1 item and makes every subsequent demo dramatically more convincing.
+## Delivery sequence and completion criteria
+
+1. **Release foundation:** resolve dependency failures and review/merge the tested
+   preview. Publish repeatable configuration, driver setup and demo instructions.
+2. **Broader live access:** ship driver certification in small, independently
+   testable increments. Keep the agent contract stable as coverage grows.
+3. **Correct lakehouse access:** implement the Iceberg reader and prove external
+   replication interoperability before advertising OLake-compatible querying.
+4. **Operational readiness:** enforce resource/security/freshness policy and expose
+   the evidence needed to operate it. These checks can gate each earlier release.
+5. **Further scale/performance:** add endpoints, incremental maintenance and
+   distribution when measured workloads justify them.
+
+Each deliverable needs reviewed code, executed correctness/failure tests,
+documented versions and limits, and a reproducible example. Update this roadmap
+when the implementation or release status changes. Driver availability,
+successful tests, merge status and production readiness are distinct milestones.
