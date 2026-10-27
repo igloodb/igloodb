@@ -99,11 +99,17 @@ impl AgentSession {
             "configuration_error", "Could not load Igloo configuration.",
             "Set IGLOO_CONFIG to an absolute TOML path; see igloo.example.toml. Use --demo to try without PostgreSQL."
         ))?;
-        let engine = DataFusionEngine::from_config(&config)
-            .await.map_err(|_| AgentError::new(
-                "connection_error", "Could not initialize the configured sources.",
-                "Check configured source paths and credentials. ADBC sources require the configured trusted driver library; native PostgreSQL does not."
-            ))?;
+        let engine = DataFusionEngine::from_config(&config).await.map_err(|error| {
+            if matches!(&error, crate::errors::IglooError::Connector { .. }) {
+                // These adapter errors have already removed driver/vendor text
+                // that could include credentials. Keep their source and stage.
+                AgentError::new("connection_error", error.to_string(),
+                    "Check igloo connectors, the trusted driver library, and exact catalog/schema/table filters.")
+            } else {
+                AgentError::new("connection_error", "Could not initialize the configured sources.",
+                    "Check configured source paths and credentials. ADBC sources require the configured trusted driver library; native PostgreSQL does not.")
+            }
+        })?;
         Ok(Self::new(engine, false))
     }
 

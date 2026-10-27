@@ -36,8 +36,9 @@ Run `cargo fmt --all -- --check`, `cargo test --locked`, and
 `cargo clippy --all-targets --all-features --locked -- -D warnings` as appropriate.
 Database integration tests use `IGLOO_TEST_POSTGRES_URI` and create/drop test
 objects; use only a disposable development database. Tests can skip without it,
-so report whether database tests actually ran. The starting checkout has existing
-`uninlined_format_args` Clippy failures; distinguish those from new diagnostics.
+so report whether database tests actually ran. The broad connector preview
+normalized the old format-string diagnostics; strict Clippy should now pass.
+Enable both ADBC driver paths to run the connector integration tests rather than skipping them.
 
 In this managed workspace, source `/workspace/.cloud/env.sh` to activate the
 installed toolchain and local test fixture settings if that file exists. Do not

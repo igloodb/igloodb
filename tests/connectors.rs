@@ -93,6 +93,21 @@ fn config_supports_non_postgres_sources_and_redacts_secrets() {
         .unwrap_err()
         .to_string();
     assert!(!error.contains("never-print-me"));
+    let config_path = temp("bad_driver_config").with_extension("toml");
+    std::fs::write(&config_path, "[[adbc_sources]]\nname='broken'\ndriver='/no-such-driver.so'\n[adbc_sources.options]\npassword='never-print-me'").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_igloo"))
+        .args(["schema"])
+        .env("IGLOO_CONFIG", &config_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("driver loading"));
+    assert!(!response.to_string().contains("never-print-me"));
+    std::fs::remove_file(config_path).unwrap();
     for extra in ["tables = []", "schemas = ['']", "entrypoint = ''"] {
         assert!(Config::from_toml(
             &sqlite_config("/driver.so", std::path::Path::new("/db.sqlite"), extra),
