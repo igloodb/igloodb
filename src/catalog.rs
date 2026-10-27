@@ -192,10 +192,8 @@ fn warn_unmatched_allowlist(allowlist: &[String], found: &[TableSchema], schemas
     for wanted in allowlist {
         if !found.iter().any(|t| &t.name == wanted) {
             log::warn!(
-                "configured table {:?} was not found as a base table in schemas {:?}; \
-                 it will not be registered",
-                wanted,
-                schemas
+                "configured table {wanted:?} was not found as a base table in schemas {schemas:?}; \
+                 it will not be registered"
             );
         }
     }
@@ -416,9 +414,7 @@ mod tests {
             assert_eq!(
                 pg_type_to_arrow(data_type, udt).as_ref(),
                 Some(expected),
-                "mapping for {:?}/{:?}",
-                data_type,
-                udt
+                "mapping for {data_type:?}/{udt:?}"
             );
         }
     }

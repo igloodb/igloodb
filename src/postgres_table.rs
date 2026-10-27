@@ -64,16 +64,13 @@ fn build_scan_sql(
     } else {
         format!(" WHERE {}", where_conjuncts.join(" AND "))
     };
-    let limit_clause = limit.map(|n| format!(" LIMIT {}", n)).unwrap_or_default();
+    let limit_clause = limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
     let relation = quote_relation(schema_name, table_name);
 
     // A projection can be empty (e.g. `SELECT COUNT(*)`), in which case
     // DataFusion only needs the row count, not any column data.
     if projected_fields.is_empty() {
-        format!(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM {}{}{}) AS t",
-            relation, where_clause, limit_clause
-        )
+        format!("SELECT COUNT(*) FROM (SELECT 1 FROM {relation}{where_clause}{limit_clause}) AS t")
     } else {
         // Select the projected columns explicitly, in projected-schema order,
         // so result column positions line up with the Arrow schema.
@@ -83,10 +80,7 @@ fn build_scan_sql(
             .collect::<Vec<_>>()
             .join(", ");
 
-        format!(
-            "SELECT {} FROM {}{}{}",
-            sql_select_cols, relation, where_clause, limit_clause
-        )
+        format!("SELECT {sql_select_cols} FROM {relation}{where_clause}{limit_clause}")
     }
 }
 
@@ -161,7 +155,7 @@ impl PostgresTable {
 
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                log::error!("PostgreSQL connection error: {}", e);
+                log::error!("PostgreSQL connection error: {e}");
             }
         });
 
@@ -414,8 +408,7 @@ impl TableProvider for PostgresTable {
                             Ok(Some(v)) => {
                                 builder.append_value(v.timestamp_nanos_opt().ok_or_else(|| {
                                     DataFusionError::Execution(format!(
-                                        "timestamp {} is out of range for nanosecond precision",
-                                        v
+                                        "timestamp {v} is out of range for nanosecond precision"
                                     ))
                                 })?)
                             }
@@ -436,8 +429,7 @@ impl TableProvider for PostgresTable {
                     |v: chrono::NaiveDateTime| {
                         v.and_utc().timestamp_nanos_opt().ok_or_else(|| {
                             DataFusionError::Execution(format!(
-                                "timestamp {} is out of range for nanosecond precision",
-                                v
+                                "timestamp {v} is out of range for nanosecond precision"
                             ))
                         })
                     }

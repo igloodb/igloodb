@@ -321,7 +321,7 @@ async fn all_supported_types_round_trip_including_nulls() {
         "c_json",
         "c_jsonb",
     ] {
-        assert!(col(name).is_null(1), "{} should be NULL in row 1", name);
+        assert!(col(name).is_null(1), "{name} should be NULL in row 1");
     }
 
     client
@@ -577,9 +577,7 @@ async fn show_tables_lists_registered_catalog_and_legacy_alias_works() {
     for expected in ["iceberg", "my_pg_table", "cat_show", "pg_table"] {
         assert!(
             listed.iter().any(|n| n == expected),
-            "SHOW TABLES missing {:?}; got {:?}",
-            expected,
-            listed
+            "SHOW TABLES missing {expected:?}; got {listed:?}"
         );
     }
 

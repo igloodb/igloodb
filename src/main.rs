@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
         }
         if matches!(
             command.as_str(),
-            "query" | "schema" | "explain" | "mcp" | "capabilities"
+            "query" | "schema" | "explain" | "mcp" | "capabilities" | "connectors"
         ) {
             if let Err(error) = igloo::agent_cli::run(command, args[1..].to_vec()).await {
                 // Never write non-protocol output into an MCP transport.
@@ -64,36 +64,46 @@ async fn main() -> Result<()> {
         return serve(config).await;
     }
 
+    let primary = config.primary_source().ok_or_else(|| igloo::errors::IglooError::Config(
+        "the legacy demo needs a native PostgreSQL source; use query, schema, mcp or serve for other connectors".into()))?;
+    let cdc_path = config.cdc_path.as_deref().ok_or_else(|| {
+        igloo::errors::IglooError::Config("the legacy demo needs cdc_path".into())
+    })?;
+    if config.parquet_path.is_none() {
+        return Err(igloo::errors::IglooError::Config(
+            "the legacy demo needs parquet_path".into(),
+        ));
+    }
+
     log::info!("Initializing Igloo components...");
     let cache = Cache::new(config.cache_max_entries, config.cache_ttl);
-    let cdc = CdcListener::new(&config.cdc_path);
+    let cdc = CdcListener::new(cdc_path);
 
     log::info!("Initializing DataFusionEngine...");
-    let engine = DataFusionEngine::new(&config.parquet_path, &config.postgres_sources).await?;
+    let engine = DataFusionEngine::from_config(&config).await?;
     log::info!("DataFusionEngine initialized successfully.");
 
     let query = "SELECT i.user_id, i.data, p.extra_info FROM iceberg i JOIN pg_table p ON i.user_id = p.user_id WHERE i.user_id = 42";
 
     if let Some(cached_batches) = cache.get(query) {
-        log::info!(target: "igloo_main", "Cache hit for query: {}", query);
+        log::info!(target: "igloo_main", "Cache hit for query: {query}");
         println!(
             "Cached result:\n{}",
             pretty_format_batches(&cached_batches)?
         );
     } else {
-        log::info!(target: "igloo_main", "Cache miss for query: {}. Executing with DataFusion.", query);
+        log::info!(target: "igloo_main", "Cache miss for query: {query}. Executing with DataFusion.");
         let record_batches = engine.query(query).await?;
         let result_str = pretty_format_batches(&record_batches)?.to_string();
         cache.set(query, record_batches);
-        println!("Cache miss. Executed with DataFusion:\n{}", result_str);
+        println!("Cache miss. Executed with DataFusion:\n{result_str}");
     }
 
     // Connect to Postgres using ADBC and run a test query against the
     // primary (first configured) source.
     let sql_adbc_test = "SELECT 1 AS test_col";
-    adbc_postgres::adbc_postgres_query_example(config.primary_source().uri.expose(), sql_adbc_test)
-        .await?;
-    log::info!(target: "igloo_main", "ADBC test query succeeded! sql: {}", sql_adbc_test);
+    adbc_postgres::adbc_postgres_query_example(primary.uri.expose(), sql_adbc_test).await?;
+    log::info!(target: "igloo_main", "ADBC test query succeeded! sql: {sql_adbc_test}");
 
     log::info!("Starting CDC sync...");
     cdc.sync(&cache);
@@ -109,18 +119,19 @@ async fn serve(config: config::Config) -> Result<()> {
     let listen_addr = match config.require_listen_addr() {
         Ok(addr) => addr.to_string(),
         Err(e) => {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             eprintln!("See igloo.example.toml for all options.");
             std::process::exit(2);
         }
     };
     log::info!("Initializing DataFusionEngine for serve mode...");
-    let engine =
-        Arc::new(DataFusionEngine::new(&config.parquet_path, &config.postgres_sources).await?);
+    let engine = Arc::new(DataFusionEngine::from_config(&config).await?);
 
     let cache = Arc::new(Cache::new(config.cache_max_entries, config.cache_ttl));
-    let cdc = Arc::new(CdcListener::new(&config.cdc_path));
-    cdc.spawn_polling(cache.clone(), config.cdc_poll_interval);
+    if let Some(path) = &config.cdc_path {
+        let cdc = Arc::new(CdcListener::new(path));
+        cdc.spawn_polling(cache.clone(), config.cdc_poll_interval);
+    }
 
     server::serve(engine, cache, &listen_addr).await
 }
@@ -132,7 +143,7 @@ fn load_config_or_exit() -> config::Config {
         Ok(config) => config,
         Err(e) => {
             // IglooError::Config's Display already carries the prefix.
-            eprintln!("{}", e);
+            eprintln!("{e}");
             eprintln!("See igloo.example.toml for all options.");
             std::process::exit(2);
         }

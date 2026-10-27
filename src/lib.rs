@@ -4,12 +4,14 @@
 //! `igloo` binary in `main.rs` wires them together.
 
 pub mod adbc_postgres;
+pub mod adbc_source;
 pub mod agent;
 pub mod agent_cli;
 pub mod cache_layer;
 pub mod catalog;
 pub mod cdc_sync;
 pub mod config;
+pub mod connectors;
 pub mod crypto_metrics;
 pub mod datafusion_engine;
 pub mod errors;

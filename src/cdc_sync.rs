@@ -93,7 +93,7 @@ impl CdcListener {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(e) => {
-                log::error!("Failed to read CDC directory {:?}: {}", dir, e);
+                log::error!("Failed to read CDC directory {dir:?}: {e}");
                 return Vec::new();
             }
         };
@@ -108,7 +108,7 @@ impl CdcListener {
                         processed.insert(path);
                         events.push(content);
                     }
-                    Err(e) => log::error!("Failed to read CDC event {:?}: {}", path, e),
+                    Err(e) => log::error!("Failed to read CDC event {path:?}: {e}"),
                 }
             }
         }

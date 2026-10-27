@@ -14,6 +14,7 @@ Usage:
   igloo query|explain|schema [--demo] --json   Read a JSON request from stdin
   igloo schema [--demo]                       Discover tables and typed columns
   igloo capabilities                         JSON limits and contract information
+  igloo connectors                           Connector routes and verified coverage
   igloo serve                                PostgreSQL wire server (configured)
   igloo crypto-demo                          Deterministic market analytics demo
 
@@ -22,7 +23,8 @@ schema JSON: {\"catalog\":\"app\",\"after\":null,\"max_tables\":50}
 
 --demo uses an in-memory sample_events(id, event, account_id) table.
 Configured agent commands read IGLOO_CONFIG / igloo.toml and source environment
-variables. No ADBC driver or model API key is required. Agent queries bypass cache.
+variables. Native PostgreSQL and --demo need no ADBC driver; adbc_sources do.
+No model API key is required. Agent queries bypass cache.
 JSON commands exit 0 on success or 2 with an error object; diagnostics use stderr.
 See docs/AGENTS.md for setup, exact encodings, limits, and MCP client examples.
 ";
@@ -55,7 +57,7 @@ pub async fn run(command: &str, args: Vec<String>) -> Result<(), AgentError> {
     }
     let is_query = matches!(command, "query" | "explain");
     if (sql.is_some() && (!is_query || json_input))
-        || (json_input && matches!(command, "mcp" | "capabilities"))
+        || (json_input && matches!(command, "mcp" | "capabilities" | "connectors"))
     {
         return Err(invalid(
             "--sql is for query/explain; --json and --sql are mutually exclusive.",
@@ -102,6 +104,10 @@ pub async fn run(command: &str, args: Vec<String>) -> Result<(), AgentError> {
     } else {
         None
     };
+    if command == "connectors" {
+        println!("{}", crate::connectors::inventory());
+        return Ok(());
+    }
     let session = if demo || command == "capabilities" {
         AgentSession::demo()?
     } else {

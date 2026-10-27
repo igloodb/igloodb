@@ -118,6 +118,24 @@ jobs:
     - uses: actions/checkout@v4
     - name: Cache cargo registry and build artifacts
       uses: Swatinem/rust-cache@v2
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install ADBC integration drivers
+      run: |
+        python -m pip install adbc-driver-sqlite==1.7.0 adbc-driver-postgresql==1.7.0
+        python - <<'PY'
+        import os
+        from pathlib import Path
+        import adbc_driver_sqlite
+        import adbc_driver_postgresql
+        with open(os.environ["GITHUB_ENV"], "a") as output:
+            for name, module in [("SQLITE", adbc_driver_sqlite), ("POSTGRES", adbc_driver_postgresql)]:
+                library = Path(module.__file__).parent / ("libadbc_driver_" + ("sqlite" if name == "SQLITE" else "postgresql") + ".so")
+                if not library.is_file():
+                    raise RuntimeError("Required ADBC test driver was not installed")
+                output.write("IGLOO_TEST_ADBC_" + name + "_DRIVER=" + str(library) + "\n")
+        PY
     # Seeds crypto_assets for the crypto-metrics federated integration test;
     # every other live-database test creates its own uniquely-named tables.
     - name: Seed integration database
@@ -130,5 +148,7 @@ jobs:
         cargo test --test pushdown --locked -- --nocapture
         cargo test --test multi_source --locked -- --nocapture
         cargo test --test pgwire_server --locked -- --nocapture --test-threads=2
+        cargo test --test agent_access --locked -- --nocapture --test-threads=2
+        cargo test --test connectors --locked -- --nocapture --test-threads=2
       env:
         IGLOO_TEST_POSTGRES_URI: postgres://postgres:postgres@localhost:5432/igloo_test

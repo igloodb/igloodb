@@ -139,11 +139,7 @@ impl Cache {
     pub fn with_clock(max_entries: usize, ttl: Duration, clock: Clock) -> Self {
         assert!(max_entries > 0, "cache max_entries must be positive");
         assert!(!ttl.is_zero(), "cache ttl must be positive");
-        log::debug!(
-            "Initializing cache: max_entries={}, ttl={:?}",
-            max_entries,
-            ttl
-        );
+        log::debug!("Initializing cache: max_entries={max_entries}, ttl={ttl:?}");
         Self {
             inner: Mutex::new(Inner {
                 store: HashMap::new(),
@@ -237,7 +233,7 @@ impl Cache {
         let mut inner = self.inner.lock().expect("cache lock poisoned");
         let evicted = inner.store.len();
         inner.store.clear();
-        log::debug!("Cache cleared; {} entries evicted.", evicted);
+        log::debug!("Cache cleared; {evicted} entries evicted.");
     }
 
     pub fn len(&self) -> usize {
@@ -297,7 +293,7 @@ mod tests {
             ),
         ];
         for (a, b) in pairs {
-            assert_eq!(normalize_query(a), normalize_query(b), "{:?} vs {:?}", a, b);
+            assert_eq!(normalize_query(a), normalize_query(b), "{a:?} vs {b:?}");
         }
     }
 
@@ -314,7 +310,7 @@ mod tests {
             ("SELECT \"a b\" FROM t", "SELECT \"a  b\" FROM t"),
         ];
         for (a, b) in pairs {
-            assert_ne!(normalize_query(a), normalize_query(b), "{:?} vs {:?}", a, b);
+            assert_ne!(normalize_query(a), normalize_query(b), "{a:?} vs {b:?}");
         }
     }
 

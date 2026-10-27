@@ -1,8 +1,9 @@
 # Igloo
 
 **SQL federation for developers and AI agents.** Igloo is an experimental,
-single-node Rust engine that queries existing PostgreSQL databases and local
-Parquet data with Apache DataFusion and Apache Arrow. Use native MCP, a JSON CLI,
+single-node Rust engine that connects databases through native PostgreSQL and
+compatible ADBC drivers, and reads named Parquet snapshots with inferred schemas.
+Apache DataFusion and Apache Arrow provide a shared query layer. Use native MCP, a JSON CLI,
 the Rust library, or PostgreSQL drivers. No LLM API key is required.
 
 ## Start with an agent
@@ -31,8 +32,8 @@ driver. Configure the built binary as a stdio subprocess in an MCP client:
 }
 ```
 
-The four tools are `igloo_capabilities`, `igloo_schema`, `igloo_explain`, and
-`igloo_query`. Agent queries are read-only, bypass the result cache, return typed
+The tools are `igloo_capabilities`, `igloo_connectors`, `igloo_schema`,
+`igloo_explain`, and `igloo_query`. Agent queries are read-only, bypass the result cache, return typed
 JSON with exact integer/decimal strings, and have row, time and response limits.
 For shell agents, `query --json` reads a request from stdin and emits one JSON
 document; failures exit 2 with an error code and hint.
@@ -43,8 +44,15 @@ The [copyable query skill](skills/igloo-query/SKILL.md) and [llms.txt](llms.txt)
 provide text context for agents. See the [market analysis](docs/MARKET_ANALYSIS.md)
 for the positioning, competitive landscape, and prioritized next steps.
 
-**Current scope:** PostgreSQL federation and a legacy, fixed-schema local Parquet
-table. No real Iceberg integration, vector search, persistent agent memory, or
+**Broad database connectivity:** the [connector guide](docs/CONNECTORS.md) explains
+the native, ADBC and Parquet routes, configuration, and the database validation
+matrix. PostgreSQL and SQLite ADBC 1.7.0 have live integration coverage; other
+compatible drivers are candidates awaiting database-specific validation. Run
+`igloo connectors` or call `igloo_connectors` for machine-readable coverage.
+The goal is broad support across databases, warehouses and lakehouses, with
+replication/CDC and JDBC/ODBC or native bridges as separate integration paths.
+
+**Current limitations:** No real Iceberg integration, vector search, persistent agent memory, or
 authenticated remote MCP. The separate pgwire endpoint is unauthenticated
 plaintext. Query response limits do not bound upstream scans/memory or guarantee
 upstream cancellation; independent sources do not share a consistent snapshot.
@@ -52,7 +60,7 @@ upstream cancellation; independent sources do not share a consistent snapshot.
 
 ## 🏗️ How Igloo Works
 
-- **Data Querying:** Apache DataFusion queries PostgreSQL through a custom `TableProvider` built on `tokio-postgres`, with conservative filter pushdown (exactly-equivalent predicates only) translated into the generated SQL. A separate, experimental ADBC FFI path also exists as a standalone example — it is not wired into DataFusion.
+- **Data Querying:** Native PostgreSQL uses a custom `tokio-postgres` provider with conservative filter pushdown. Generic ADBC sources discover tables through standard metadata and stream Arrow batches into DataFusion through a separate provider. The legacy `adbc_postgres.rs` smoke example remains a standalone demonstration.
 - **Materialized Views & Auto-Cache:** Today the "iceberg" table is a plain directory of Parquet files (no Iceberg manifests, snapshots, or materialized views), and cache-invalidating change events are a directory of JSON files. Real Apache Iceberg integration is planned — see Roadmap.
 - **Smart Caching:** Query results are cached in memory (with pluggable backends planned), and cache invalidation/refresh is driven by Change Data Capture (CDC) events read from JSON files (real Iceberg-based CDC is planned — see Roadmap).
 
@@ -69,7 +77,8 @@ flowchart LR
     CDC["JSON-file change events"] -->|invalidate| CACHE
     ENGINE --> PG1["PostgreSQL source A"]
     ENGINE --> PG2["PostgreSQL source B"]
-    ENGINE --> PARQUET["Local Parquet / fixed schema"]
+    ENGINE --> ADBC["Compatible ADBC database drivers"]
+    ENGINE --> PARQUET["Named local Parquet / inferred schemas"]
 ```
 
 - 🧠 **Query Engine:** Apache DataFusion — Arrow-native SQL execution
@@ -259,7 +268,7 @@ Simple `WHERE` predicates are translated to SQL and pushed down to PostgreSQL so
 
 Igloo's behavior is controlled by a small set of required settings. They can come from a TOML config file (`igloo.toml` in the working directory, or any path via `IGLOO_CONFIG` — see `igloo.example.toml`) and/or environment variables, with **environment variables taking precedence**. When running locally, environment variables can be set in a `.env` file (by copying `.env.example`) or directly in your shell. When using Docker Compose, these are set within the `docker-compose.yml` file for the `igloo` service.
 
-**Igloo fails fast:** every setting below is required, and startup aborts with an error naming the missing setting if one is absent. There are no built-in localhost defaults.
+**Igloo fails fast:** configure at least one native PostgreSQL, ADBC, or named Parquet source. Paths `parquet_path` and `cdc_path` are optional legacy features; they are required only by the old one-shot demonstration. Explicitly empty paths and invalid configuration still fail. There are no built-in localhost connection defaults. ADBC and named Parquet configuration are covered in the [connector guide](docs/CONNECTORS.md).
 
 ### General Configuration
 

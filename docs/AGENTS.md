@@ -61,6 +61,7 @@ events per account, then run it. Report whether results are truncated.”
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `igloo_capabilities` | None | Dialect, encodings, limits and limitations |
+| `igloo_connectors` | None | Working routes, verified drivers, candidates and planned coverage |
 | `igloo_schema` | Optional `catalog`, `after`, `max_tables` | Tables, quoted qualified names, columns and `next_cursor` |
 | `igloo_explain` | `sql`, optional `max_rows`, `timeout_ms` | Logical plan without executing the query |
 | `igloo_query` | Same as explain | Typed column metadata, JSON row objects and truncation metadata |
@@ -101,7 +102,15 @@ For configured MCP, remove `--demo` and supply `IGLOO_CONFIG` with the absolute
 TOML path, plus `IGLOO_SOURCE_APP_URI`, in the client's process environment or
 supported secret mechanism. Keep credential values out of prompts and committed
 configuration. The binary reads environment variables directly; it does not load
-`.env` automatically. No ADBC driver or listen address is needed in agent mode.
+`.env` automatically. Native PostgreSQL needs no ADBC driver; `adbc_sources`
+requires a trusted installed driver. A listen address is not needed in agent mode.
+
+For databases beyond native PostgreSQL, see the [connector guide](CONNECTORS.md).
+It covers generic ADBC sources, exact schema/table allowlists, driver-specific
+secret options, and named Parquet snapshots with inferred schemas. These routes
+use the same MCP/JSON query policy. The optional legacy `parquet_path` retains its
+fixed schema; named `parquet_sources` support other schemas. Actual Iceberg/CDC
+integration and JDBC/ODBC bridges remain planned.
 
 ```sh
 export IGLOO_CONFIG=/absolute/path/to/igloo-agent.toml

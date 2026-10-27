@@ -294,3 +294,28 @@ Both enforce a single query and full-plan read-only checks before execution,
 bound result rows/time/bytes, and bypass the existing cache. The no-services demo
 registers an in-memory fixture. The legacy pgwire and demonstration paths retain
 their existing behavior. See [agent contracts and limitations](AGENTS.md).
+
+## Broader connector foundation
+
+The current preview extends the historical audit above. `DataFusionEngine::from_config`
+registers native PostgreSQL, generic `adbc_sources`, and named local `parquet_sources`
+in the same session. `src/connectors.rs` owns typed configuration and a machine-readable
+coverage inventory; `src/adbc_source.rs` implements the ADBC table provider.
+
+ADBC metadata uses GetObjects/GetTableSchema on a blocking worker, exact local
+allowlist checks and one remote catalog per configured source. The provider
+generates quoted SELECT projections; DataFusion applies filters and joins locally.
+Deferred scan execution streams Arrow batches through a queue bounded to two
+batches. Source libraries are trusted native code retained for the process
+lifetime so FFI release callbacks remain valid. A local timeout cannot interrupt
+a blocked driver call. Source-side timeouts, privileges and TLS remain necessary.
+
+Named Parquet sources infer schemas and support multiple local tables under
+`source.public.table`. The optional legacy `parquet_path` preserves the old fixed
+schema. Configuration no longer requires dummy Parquet or CDC paths for native
+PostgreSQL/ADBC operation; the old one-shot demo still needs its legacy inputs.
+`Config::primary_source()` now returns an Option because PostgreSQL is optional.
+
+The fifth MCP tool, `igloo_connectors`, and `igloo connectors` report verified
+routes separately from candidate drivers and planned Iceberg/replication/bridge
+work. This is connectivity, not a CDC engine. See [connector strategy](CONNECTORS.md).

@@ -55,9 +55,8 @@ pub async fn serve(
 ) -> Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
     log::warn!(
-        "pgwire endpoint on {} is UNAUTHENTICATED plaintext; \
-         do not expose it beyond localhost or a trusted network",
-        listen_addr
+        "pgwire endpoint on {listen_addr} is UNAUTHENTICATED plaintext; \
+         do not expose it beyond localhost or a trusted network"
     );
     serve_with_listener(engine, cache, listener).await
 }
@@ -78,15 +77,11 @@ pub async fn serve_with_listener(
     );
     loop {
         let (socket, peer_addr) = listener.accept().await?;
-        log::debug!("pgwire connection accepted from {}", peer_addr);
+        log::debug!("pgwire connection accepted from {peer_addr}");
         let factory = factory.clone();
         tokio::spawn(async move {
             if let Err(e) = process_socket(socket, None, factory).await {
-                log::error!(
-                    "pgwire connection from {} ended with error: {}",
-                    peer_addr,
-                    e
-                );
+                log::error!("pgwire connection from {peer_addr} ended with error: {e}");
             }
         });
     }
@@ -360,8 +355,7 @@ fn map_arrow_type(dt: &DataType) -> PgWireResult<Type> {
         DataType::Date32 => Ok(Type::DATE),
         DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok(Type::TIMESTAMP),
         other => Err(user_error(format!(
-            "column type {:?} is not supported over the pgwire endpoint yet",
-            other
+            "column type {other:?} is not supported over the pgwire endpoint yet"
         ))),
     }
 }
@@ -736,8 +730,7 @@ fn encode_cell(
         }
         // map_arrow_type already rejected everything else at schema time.
         other => Err(user_error(format!(
-            "internal: unhandled column type {:?} during row encoding",
-            other
+            "internal: unhandled column type {other:?} during row encoding"
         ))),
     }
 }

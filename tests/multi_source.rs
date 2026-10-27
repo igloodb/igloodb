@@ -338,9 +338,7 @@ async fn show_tables_lists_every_source_catalog() {
             listed
                 .iter()
                 .any(|(c, s, n)| (c.as_str(), s.as_str(), n.as_str()) == expected),
-            "SHOW TABLES missing {:?}; got {:?}",
-            expected,
-            listed
+            "SHOW TABLES missing {expected:?}; got {listed:?}"
         );
     }
 

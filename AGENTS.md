@@ -9,7 +9,8 @@ Igloo is an experimental, single-node SQL federation engine in Rust. Start with
 - `src/main.rs`: command dispatch; legacy one-shot demo, pgwire server and crypto demo.
 - `src/agent.rs`: shared read-only agent contract, discovery, limits and JSON encoding.
 - `src/agent_cli.rs`: noninteractive JSON commands; stdout must remain parseable.
-- `src/mcp.rs`: official Rust MCP SDK, stdio transport and four tools.
+- `src/mcp.rs`: official Rust MCP SDK, stdio transport and five tools.
+- `src/adbc_source.rs`, `connectors.rs`: generic ADBC discovery/streaming, source configuration and coverage inventory. Keep candidate driver availability distinct from verified integrations.
 - `src/datafusion_engine.rs`, `catalog.rs`, `postgres_table.rs`, `pushdown.rs`:
   execution, source introspection, scanning and conservative filter translation.
 - `src/cache_layer.rs`, `cdc_sync.rs`, `server.rs`: pgwire cache and file-based invalidation.

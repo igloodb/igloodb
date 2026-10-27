@@ -14,7 +14,7 @@ use crate::errors::{IglooError, Result};
 
 pub async fn adbc_postgres_query_example(uri: &str, sql: &str) -> Result<()> {
     // The URI is deliberately not logged: it may embed credentials.
-    log::info!(target: "adbc_example", "Attempting ADBC query. SQL: {}", sql);
+    log::info!(target: "adbc_example", "Attempting ADBC query. SQL: {sql}");
 
     // Load the Postgres ADBC driver dynamically
     // Ensure the .so/.dylib/.dll is in your LD_LIBRARY_PATH/DYLD_LIBRARY_PATH/PATH
@@ -33,7 +33,7 @@ pub async fn adbc_postgres_query_example(uri: &str, sql: &str) -> Result<()> {
 
     let reader = statement.execute()?;
 
-    log::info!(target: "adbc_example", "ADBC statement executed. Reading results for SQL: {}", sql);
+    log::info!(target: "adbc_example", "ADBC statement executed. Reading results for SQL: {sql}");
 
     // The reader is a RecordBatchReader, i.e. an iterator of RecordBatch results.
     let collected_batches_result: std::result::Result<Vec<RecordBatch>, arrow::error::ArrowError> =
@@ -52,7 +52,7 @@ pub async fn adbc_postgres_query_example(uri: &str, sql: &str) -> Result<()> {
             }
         }
         Err(arrow_error) => {
-            log::error!(target: "adbc_example", "Failed to collect record batches: {}", arrow_error);
+            log::error!(target: "adbc_example", "Failed to collect record batches: {arrow_error}");
             return Err(IglooError::Arrow(arrow_error));
         }
     }
@@ -64,7 +64,7 @@ pub async fn adbc_postgres_query_example(uri: &str, sql: &str) -> Result<()> {
     // connection.close()?;
     // database.close()?;
 
-    log::info!(target: "adbc_example", "ADBC query example completed successfully for SQL: {}", sql);
+    log::info!(target: "adbc_example", "ADBC query example completed successfully for SQL: {sql}");
     Ok(())
 }
 
@@ -79,7 +79,7 @@ fn print_arrow_batch(batch: &RecordBatch) -> Result<()> {
     for col_idx in 0..batch.num_columns() {
         let col_name = schema.field(col_idx).name();
         let data_type = schema.field(col_idx).data_type();
-        print!("Column '{}' ({}): [", col_name, data_type);
+        print!("Column '{col_name}' ({data_type}): [");
         let array = batch.column(col_idx);
 
         for row_idx in 0..array.len() {
@@ -147,7 +147,7 @@ fn print_arrow_batch(batch: &RecordBatch) -> Result<()> {
                             val,
                             tz_opt
                                 .as_ref()
-                                .map_or("".to_string(), |s| format!(" ({})", s))
+                                .map_or("".to_string(), |s| format!(" ({s})"))
                         );
                     }
                     DataType::Boolean => print!(
@@ -175,8 +175,8 @@ fn print_arrow_batch(batch: &RecordBatch) -> Result<()> {
                         print!("[binary data: {} bytes]", val.len());
                     }
                     other => {
-                        log::warn!(target: "adbc_print", "Unsupported data type for printing: {:?}", other);
-                        print!("[unsupported: {:?}]", other);
+                        log::warn!(target: "adbc_print", "Unsupported data type for printing: {other:?}");
+                        print!("[unsupported: {other:?}]");
                     }
                 }
             }

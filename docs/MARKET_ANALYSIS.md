@@ -8,18 +8,22 @@ not estimate market size, adoption, revenue, or comparative performance.
 
 ## Recommendation
 
-Position Igloo as **an experimental SQL federation engine for developers and AI
-agents working with existing PostgreSQL databases and local Parquet data**.
-The initial job is getting a useful, inspectable answer across existing sources
-with a small local integration surface. Preserve SQL, qualified catalogs, Arrow,
-and PostgreSQL driver compatibility. Add agent interfaces to those strengths.
+Position Igloo as **a common data access and SQL federation layer for developers
+and AI agents across databases, warehouses and lakehouses**. Broad connector
+coverage is a product goal. Use native adapters and compatible ADBC drivers for
+live access, open table formats for replicated/snapshot access, and additional
+bridges or native adapters for systems those routes cannot reach. Preserve one
+SQL, catalog, type and agent contract across these routes.
 
 Do not initially expand into vector storage, persistent agent memory, a managed
 transactional database, or an LLM platform. Those jobs have strong alternatives
 and require capabilities Igloo does not possess. MCP is an integration requirement,
 not a durable competitive advantage. Federation itself is also established.
 Igloo needs to earn preference through measurable setup simplicity, correct
-answers, predictable access, and transparent execution.
+answers, predictable access, and transparent execution. See the
+[connector strategy and implemented foundation](CONNECTORS.md) for the
+OLake/Columnar comparison, coverage evidence and expansion sequence. “All
+databases” is the intended direction, not a certification claim.
 
 ## Demand and market structure
 
@@ -37,6 +41,8 @@ There are four distinct buying jobs behind the broad label “AI database”:
 | Retrieve context and memories | Embeddings, documents, similarity retrieval | LanceDB, Chroma, Qdrant | Low today: no native retrieval or memory lifecycle |
 | Answer operational questions | SQL joins and aggregates over business sources | Direct PostgreSQL, DuckDB, Spice, Tinybird | Best initial hypothesis |
 | Enterprise federation | Many connectors, distributed execution, governance | Trino, broader data platforms | Architectural overlap; maturity gap |
+| Standard database access | Arrow-native connections and metadata across database families | Columnar / ADBC / dbc | Reuse compatible drivers as the main coverage multiplier |
+| Replication into open formats | Snapshots, source changes, deletes and recovery | OLake and other ingestion systems | Separate integration path; querying data does not implement CDC |
 
 The meaningful substitute is often a developer giving an agent `psql`, Python,
 DuckDB, and two connection strings. Any proposed Igloo workflow must beat that
@@ -48,6 +54,8 @@ large commercial platforms.
 | Alternative | Verified offering | Reason to choose it | Implication for Igloo |
 | --- | --- | --- | --- |
 | **Spice.ai** | SQL federation/acceleration positioning and configured tools served over Streamable HTTP MCP | Broad data and AI runtime requirements | Closest strategic overlap. A Rust/Arrow/MCP story alone is not differentiation. Win a deliberately smaller workflow or acknowledge the better fit. |
+| **Columnar / dbc** | Arrow/ADBC access and driver installation across database families | Applications needing a standard connectivity interface | Build on compatible drivers; validate real database semantics instead of equating installation with support. |
+| **OLake** | Database replication into Iceberg and Parquet, plus table maintenance products | Teams moving operational data into a lakehouse | Complement live federation with correctly read replicated tables; do not treat raw Iceberg files as a complete table. |
 | **DuckDB + community MCP** | Local analytical SQL with a community extension exposing tables, queries, and tools through MCP | File analytics and existing DuckDB projects | Strong default baseline. The MCP extension is community maintained; do not present it as an official DuckDB server. Demonstrate easier PostgreSQL source setup and reproducible cross-source workflows. |
 | **Tinybird** | Remote MCP for Workspace SQL and published API Endpoints, with token-scoped access | Operational analytics APIs and deployed analytics tools | Validates reusable query tools and scoped access. Igloo's local process avoids requiring a hosted Workspace but lacks equivalent operational maturity. |
 | **Supabase** | MCP for project interaction, including read-only and project/feature scoping options | Teams already building on Supabase | Direct platform tools can make an intermediate engine unnecessary. Integrate existing Postgres rather than claim to replace their application stack. |
@@ -68,6 +76,7 @@ Primary sources supporting the matrix, checked on the research date:
 - [LanceDB documentation](https://docs.lancedb.com/).
 - [Chroma documentation](https://docs.trychroma.com/) and [Qdrant MCP source](https://github.com/qdrant/mcp-server-qdrant).
 - [Trino architecture and catalogs](https://trino.io/docs/current/overview/concepts.html).
+- [Columnar](https://columnar.tech/), [dbc documentation](https://docs.columnar.tech/dbc/), and [OLake](https://olake.io/).
 
 No inference about competitor cost, latency, security quality, market share or
 adoption follows from this table. Hosted and open-source offerings differ; validate
@@ -75,8 +84,8 @@ the particular deployment and current pricing when evaluating a purchase.
 
 ## Initial users and concrete workflows
 
-**Primary hypothesis: developers building internal analysis agents on a Postgres
-stack.** The user has two or more relevant sources, permission to read selected
+**Primary hypothesis: developers building agents over a heterogeneous data stack.**
+The user has two or more relevant databases, warehouses or snapshots, permission to read selected
 tables, and a coding agent that can run local tools. The buyer, if one emerges,
 is likely the engineering lead responsible for integration and operation. This
 buyer description needs customer validation.
@@ -127,7 +136,8 @@ cache invalidation, and an isolated crypto analytics demo.
 
 The main developer-experience gaps were a hard-coded default query, no arbitrary
 JSON query command, no native agent protocol, no typed agent discovery contract,
-and onboarding oriented around database/ADBC configuration. The website accurately
+and onboarding oriented around database/ADBC configuration. PostgreSQL-specific
+registration and the fixed legacy Parquet schema also constrained coverage. The website accurately
 described many limitations but offered no agent-specific path.
 
 Do not inherit unsupported claims from early project descriptions: the `iceberg`
@@ -146,26 +156,35 @@ not a production CDC integration. Pgwire remains unauthenticated plaintext.
 - Agent setup documentation, client config examples, a copyable data-access skill,
   Python/JavaScript subprocess examples, and website discovery assets.
 - Tests for policy, serialization, budgets, pagination, CLI behavior and MCP calls.
+- Generic ADBC catalog discovery and streaming DataFusion providers, with trusted
+  driver configuration and environment-bound secret options.
+- Named Parquet sources with inferred schemas, plus joins with SQLite; live ADBC
+  SQLite and PostgreSQL validation and a native/ADBC PostgreSQL join.
+- Machine-readable connector coverage through CLI and MCP, distinguishing tested
+  routes, candidate drivers and planned lakehouse/replication/bridge support.
 
 Agent tools intentionally bypass the existing cache. This trades cached response
 reuse for clear source-read behavior until dependencies, invalidation and freshness
 metadata are mature. Cross-source queries still have no shared snapshot. The
-fixed Parquet schema, upstream scan/memory behavior, authentication/TLS, and actual
-CDC connectors remain unresolved. The implementation is a foundation for pilots,
+fixed schema remains only in the optional legacy Parquet path. Additional driver
+certification, upstream scan/memory behavior, authentication/TLS, real Iceberg
+reads and CDC connectors remain unresolved. The implementation is a foundation for pilots,
 not a claim of production readiness or proven market fit.
 
 ## Priorities after the foundation
 
 | Priority | Deliverable | Acceptance criterion | Why this order |
 | --- | --- | --- | --- |
-| Next | Configurable Parquet schemas and named local tables | Two distinct file schemas can be discovered and joined without Rust edits | Removes a direct limitation in the proposed workflow |
+| Done in preview | Generic ADBC and named Parquet sources | Real driver metadata/queries and a distinct Parquet schema joined without engine edits | Establishes the broader connector foundation |
+| Next | Certify priority database/warehouse drivers | Recorded driver/server/auth/type matrix with exact-result tests | Converts an available driver route into evidence-backed support |
+| Next | Real Iceberg catalog/snapshot reads | Correct manifests, snapshots, deletes and schema evolution; OLake interoperability tests | Makes replicated-source coverage reliable |
 | Next | Source statement timeouts, cancellation and memory accounting | Timed-out queries stop upstream work within a measured budget; memory stress case has a controlled failure | Response limits alone do not control source load |
 | Next | Repeatable evaluation harness | Fixed question set, expected SQL/results and schema/error tasks; compare direct Postgres, DuckDB and Igloo | Tests whether the product actually saves effort |
 | Then | Parameterized, named query tools | Declared input/output schemas and scoped source access, with no SQL string interpolation | Reduces unnecessary SQL generation and narrows exposed operations |
 | Then | Real freshness and provenance metadata | Source dependencies, cache age/invalidation and documented consistency for each result | Needed before claiming trustworthy cached operational answers |
 | Then | Easier installation | Versioned binaries with checksums and tested client setup | A large first Rust build is an onboarding disadvantage |
 | Conditional | Remote MCP/HTTP | Authenticated scoped access, TLS, rate limits, auditability and tested isolation | Build only when remote/shared deployment demand is demonstrated |
-| Defer | Vector database, memory lifecycle, distributed execution, broad connector list | Evidence that the primary users require it and will adopt it | Large scope with established alternatives |
+| Defer | Vector storage, memory lifecycle, distributed execution | Evidence that the primary users require it and will adopt it | Broad database connectivity does not require rebuilding every storage product |
 
 These are priorities, not promised dates. Keep the core roadmap's existing
 technical work visible and adjust it using pilot evidence.
@@ -217,16 +236,17 @@ developer choosing the workflow again for a real task.
 
 ## Verification of this implementation
 
-Validated locally on Rust 1.88 with the disposable PostgreSQL 15 fixture:
-**169 Rust tests passed**, including live source discovery, allowlists, uncached
+Validated locally on Rust 1.88 with disposable PostgreSQL 15 and SQLite fixtures:
+**175 Rust tests passed**, including the six connector tests with both ADBC
+drivers enabled, live source discovery, allowlists, uncached
 source updates, policy/budget/encoding behavior, SDK MCP calls and the JSON CLI.
 The native stdio binary also passed an independent subprocess initialization,
 tool discovery and query smoke check. Both the legacy PostgreSQL/ADBC demonstration
 and the crypto analytics demonstration completed successfully.
 
-Formatting and rustdoc with warnings denied passed. Strict Clippy remains blocked
-by the starting checkout's 80 `uninlined_format_args` diagnostics. A supplemental
-all-targets/all-features run with only that lint excluded passed.
+Formatting, strict all-targets/all-features Clippy and rustdoc with warnings denied
+passed. The starting checkout's 80 `uninlined_format_args` diagnostics were
+mechanically normalized so the strict lint check can validate this work.
 
 The paired website passed its production build and static checks for **13 HTML
 pages**, local links and agent discovery assets. **30 desktop/mobile browser tests

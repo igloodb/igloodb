@@ -172,7 +172,7 @@ async fn mcp_sdk_client_discovers_and_calls_native_tools() {
     });
     let client = ().serve(client_io).await.unwrap();
     let tools = client.list_all_tools().await.unwrap();
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 5);
     assert!(tools
         .iter()
         .all(|tool| tool.annotations.as_ref().unwrap().read_only_hint == Some(true)));

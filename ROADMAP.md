@@ -1,5 +1,13 @@
 # 🍙 Igloo Roadmap: From Proof-of-Concept to 10x Value
 
+**Broad connectivity update:** 2026-10-27. The goal is access across databases,
+warehouses and lakehouses through native adapters, compatible ADBC drivers,
+open-format snapshots and planned replication/bridge integrations. The preview
+now includes generic ADBC discovery/streaming, verified SQLite/PostgreSQL driver
+tests, named Parquet schemas and connector discovery for agents. Additional
+database certification, real Iceberg reads, OLake interoperability and bridges
+are next priorities; they are not already implemented. See [connector strategy](docs/CONNECTORS.md).
+
 **Agent strategy update:** 2026-10-27. The historical baseline below predates
 several implemented features; it is not a description of the current runtime.
 Igloo now includes pgwire, multi-source PostgreSQL catalogs, bounded Arrow caching,

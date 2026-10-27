@@ -32,6 +32,14 @@ impl IglooMcp {
     }
 
     #[tool(
+        description = "Discover Igloo connector routes, verified integrations, unverified ADBC candidates and planned replication/lakehouse coverage. Driver availability does not imply certified database compatibility.",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn igloo_connectors(&self) -> CallToolResult {
+        CallToolResult::structured(crate::connectors::inventory())
+    }
+
+    #[tool(
         description = "Discover registered tables and typed columns. Call before writing SQL. Use qualified_name verbatim and follow next_cursor with after for more tables. Default-catalog entries may be aliases of source tables.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
