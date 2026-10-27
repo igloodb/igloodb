@@ -1,6 +1,15 @@
 # 🍙 Igloo Roadmap: From Proof-of-Concept to 10x Value
 
-**Status:** Draft for review · **Last updated:** 2026-07-06
+**Agent strategy update:** 2026-10-27. The historical baseline below predates
+several implemented features; it is not a description of the current runtime.
+Igloo now includes pgwire, multi-source PostgreSQL catalogs, bounded Arrow caching,
+filter pushdown and integration tests, plus native stdio MCP and read-only JSON
+agent commands in this branch. Read the [market analysis and product priorities](docs/MARKET_ANALYSIS.md)
+and [agent guide](docs/AGENTS.md) for the current agent direction. Near-term
+priorities are configurable Parquet schemas, source timeouts/cancellation and
+memory accounting, reproducible agent evaluations, and easier installation.
+
+**Original roadmap status:** Draft for review · **Baseline date:** 2026-07-06
 
 ---
 

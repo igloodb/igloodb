@@ -14,6 +14,37 @@ async fn main() -> Result<()> {
     // Logs go to stderr. Defaults to `info` but respects RUST_LOG if set.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(command) = args.first() {
+        if matches!(command.as_str(), "--help" | "-h" | "help") {
+            print!("{}", igloo::agent_cli::HELP);
+            return Ok(());
+        }
+        if matches!(command.as_str(), "--version" | "-V") {
+            println!("igloo {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        if matches!(
+            command.as_str(),
+            "query" | "schema" | "explain" | "mcp" | "capabilities"
+        ) {
+            if let Err(error) = igloo::agent_cli::run(command, args[1..].to_vec()).await {
+                // Never write non-protocol output into an MCP transport.
+                if command == "mcp" {
+                    eprintln!("{}", error.envelope());
+                } else {
+                    println!("{}", error.envelope());
+                }
+                std::process::exit(2);
+            }
+            return Ok(());
+        }
+        if !matches!(command.as_str(), "serve" | "crypto-demo") || args.len() > 1 {
+            eprintln!("Unknown command or argument. Run igloo --help.");
+            std::process::exit(2);
+        }
+    }
+
     // `igloo crypto-demo` is self-contained (Parquet-only): it synthesizes
     // deterministic sample OHLCV data if the directory is empty and prints a
     // suite of crypto market metrics computed through DataFusion. It needs no

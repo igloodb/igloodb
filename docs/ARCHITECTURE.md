@@ -284,3 +284,13 @@ README roadmap (`README.md:209-213`):
 | Optional persistent cache backend (RocksDB, Redis) | Not started | Cache is a concrete in-memory `HashMap` with no backend trait (`src/cache_layer.rs:7-10`). |
 
 Separately, the README "Features" section now matches the code: "Fast SQL Execution with DataFusion" (done — `src/datafusion_engine.rs:63-72`), "Join Support for Postgres + Arrow datasets" (done in-memory, with conservative filter pushdown; schemas still hardcoded — see item 3), caching keyed by canonicalized SQL (done — `src/cache_layer.rs:31`), and CDC-driven invalidation from JSON event files (done, with Iceberg explicitly marked as planned).
+
+## Agent access
+
+The agent entry points use the existing DataFusion engine through a dedicated
+`AgentSession` in `src/agent.rs`. `src/mcp.rs` exposes it with the official Rust
+MCP SDK over stdio; `src/agent_cli.rs` exposes the same contracts as JSON commands.
+Both enforce a single query and full-plan read-only checks before execution,
+bound result rows/time/bytes, and bypass the existing cache. The no-services demo
+registers an in-memory fixture. The legacy pgwire and demonstration paths retain
+their existing behavior. See [agent contracts and limitations](AGENTS.md).

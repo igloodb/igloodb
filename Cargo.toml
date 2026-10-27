@@ -7,7 +7,7 @@ edition = "2021"
 rust-version = "1.88"
 
 authors = ["Igloo Contributors"]
-description = "An experimental SQL query engine with an intelligent caching layer, built on DataFusion, Arrow and ADBC."
+description = "An experimental SQL federation engine for developers and AI agents, built on DataFusion and Arrow."
 license = "MIT"
 
 [dependencies]
@@ -37,6 +37,8 @@ env_logger = "0.11"
 num_cpus = "1"
 pgwire = "0.30.2"
 futures = "0.3.32"
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
 
 [dev-dependencies]
 bytes = "1"
+rmcp = { version = "=3.5.1", default-features = false, features = ["client"] }
