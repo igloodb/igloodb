@@ -129,11 +129,10 @@ async fn seed(client: &Client) {
         let note = if i % 10 == 0 {
             "NULL".to_string()
         } else {
-            format!("'note-{}'", i)
+            format!("'note-{i}'")
         };
         values.push(format!(
-            "({}, {}, {}::double precision, {}, {})",
-            i, category, i, active, note
+            "({i}, {category}, {i}::double precision, {active}, {note})"
         ));
     }
     let sql = format!(
@@ -210,14 +209,9 @@ async fn selective_query_reduces_rows_fetched_from_postgres() {
     let fetched = provider_rows_fetched(&engine, "pushdown_items").await;
     assert!(
         fetched < 50,
-        "expected << {} rows fetched with pushdown, got {}",
-        ROW_COUNT,
-        fetched
+        "expected << {ROW_COUNT} rows fetched with pushdown, got {fetched}"
     );
-    eprintln!(
-        "rows_fetched with pushdown for `id > 995`: {} (table has {})",
-        fetched, ROW_COUNT
-    );
+    eprintln!("rows_fetched with pushdown for `id > 995`: {fetched} (table has {ROW_COUNT})");
 
     client
         .batch_execute("DROP TABLE IF EXISTS pushdown_items;")

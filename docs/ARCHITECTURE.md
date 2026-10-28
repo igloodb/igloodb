@@ -284,3 +284,64 @@ README roadmap (`README.md:209-213`):
 | Optional persistent cache backend (RocksDB, Redis) | Not started | Cache is a concrete in-memory `HashMap` with no backend trait (`src/cache_layer.rs:7-10`). |
 
 Separately, the README "Features" section now matches the code: "Fast SQL Execution with DataFusion" (done — `src/datafusion_engine.rs:63-72`), "Join Support for Postgres + Arrow datasets" (done in-memory, with conservative filter pushdown; schemas still hardcoded — see item 3), caching keyed by canonicalized SQL (done — `src/cache_layer.rs:31`), and CDC-driven invalidation from JSON event files (done, with Iceberg explicitly marked as planned).
+
+## Current implementation boundary (28 October 2026)
+
+The historical audit above describes earlier revisions; its old line numbers,
+single-request claims and roadmap table are not a current capability inventory.
+The following additions and [roadmap](../ROADMAP.md) describe this source preview.
+
+The cache now tracks estimated key and Arrow array bytes, evicts to respect
+entry and byte budgets, and rejects oversized replacements. `clear()` increments
+an invalidation generation under the same lock. Pgwire reads capture that
+generation before execution and call `set_if_generation` afterward; a file
+change during execution can no longer restore the invalidated result.
+This is admission safety, not detection of live database changes.
+
+`postgres_cdc` owns a direct native `pgoutput` stream, volatile source health,
+generation UUIDs, source-wide committed-change epochs and transactional marker
+waiters. Marker-only transactions do not advance the data epoch. A barrier only
+resolves on the marker's containing Commit. The operator `cdc-check` command
+verifies this path with a temporary slot; query execution does not yet use it.
+
+Future strict-cache integration must supply complete dependencies, validate
+publication/schema/permissions/source identity, pin native source snapshots
+after initial barriers and validate again before admitting fills. Existing
+provider scans use separate source statements, so they are not query-wide
+repeatable-read snapshots. There is no global cross-source snapshot.
+
+## Agent access
+
+The agent entry points use the existing DataFusion engine through a dedicated
+`AgentSession` in `src/agent.rs`. `src/mcp.rs` exposes it with the official Rust
+MCP SDK over stdio and authenticated Streamable HTTP; `src/agent_cli.rs` exposes
+the same contracts as JSON commands.
+Both enforce a single query and full-plan read-only checks before execution,
+bound result rows/time/bytes, and bypass the existing cache. The no-services demo
+registers an in-memory fixture. The legacy pgwire and demonstration paths retain
+their existing behavior. See [agent contracts and limitations](AGENTS.md).
+
+## Broader connector foundation
+
+The current preview extends the historical audit above. `DataFusionEngine::from_config`
+registers native PostgreSQL, generic `adbc_sources`, and named local `parquet_sources`
+in the same session. `src/connectors.rs` owns typed configuration and a machine-readable
+coverage inventory; `src/adbc_source.rs` implements the ADBC table provider.
+
+ADBC metadata uses GetObjects/GetTableSchema on a blocking worker, exact local
+allowlist checks and one remote catalog per configured source. The provider
+generates quoted SELECT projections; DataFusion applies filters and joins locally.
+Deferred scan execution streams Arrow batches through a queue bounded to two
+batches. Source libraries are trusted native code retained for the process
+lifetime so FFI release callbacks remain valid. A local timeout cannot interrupt
+a blocked driver call. Source-side timeouts, privileges and TLS remain necessary.
+
+Named Parquet sources infer schemas and support multiple local tables under
+`source.public.table`. The optional legacy `parquet_path` preserves the old fixed
+schema. Configuration no longer requires dummy Parquet or CDC paths for native
+PostgreSQL/ADBC operation; the old one-shot demo still needs its legacy inputs.
+`Config::primary_source()` now returns an Option because PostgreSQL is optional.
+
+The fifth MCP tool, `igloo_connectors`, and `igloo connectors` report verified
+routes separately from candidate drivers and planned Iceberg/replication/bridge
+work. This is connectivity, not a CDC engine. See [connector strategy](CONNECTORS.md).

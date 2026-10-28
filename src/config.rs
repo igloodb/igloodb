@@ -11,6 +11,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::connectors::{AdbcSource, ParquetSource};
 use crate::errors::{IglooError, Result};
 
 /// A configuration value that must never appear in logs or debug output
@@ -55,8 +56,13 @@ struct FileConfig {
     /// Multi-source form: one `[[sources]]` entry per PostgreSQL database.
     /// Mutually exclusive with the `postgres_uri`/`postgres_schemas` pair.
     sources: Option<Vec<FileSource>>,
+    #[serde(default)]
+    adbc_sources: Vec<AdbcSource>,
+    #[serde(default)]
+    parquet_sources: Vec<ParquetSource>,
     listen_addr: Option<String>,
     cache_max_entries: Option<u64>,
+    cache_max_bytes: Option<u64>,
     cache_ttl_seconds: Option<u64>,
     cdc_poll_seconds: Option<u64>,
 }
@@ -131,20 +137,26 @@ impl PostgresSource {
 /// Fully-resolved application configuration.
 #[derive(Debug)]
 pub struct Config {
-    /// Directory of Parquet files registered as the `iceberg` table.
-    pub parquet_path: String,
-    /// Directory watched for CDC event files.
-    pub cdc_path: String,
-    /// PostgreSQL sources to federate over, in configured order. Never
-    /// empty after validation; the first is the primary source (it owns the
+    /// Optional legacy directory registered as the fixed-schema `iceberg` table.
+    pub parquet_path: Option<String>,
+    /// Optional directory watched for JSON cache-invalidation event files.
+    pub cdc_path: Option<String>,
+    /// Native PostgreSQL sources, in configured order. May be empty when other
+    /// connector families are configured; the first is the primary (it owns the
     /// unqualified table names — see
     /// [`crate::datafusion_engine::DataFusionEngine`]).
     pub postgres_sources: Vec<PostgresSource>,
+    /// Generic ADBC drivers, registered alongside native PostgreSQL catalogs.
+    pub adbc_sources: Vec<AdbcSource>,
+    /// Named local Parquet snapshots with inferred Arrow schemas.
+    pub parquet_sources: Vec<ParquetSource>,
     /// Address for the pgwire server (`igloo serve`). Optional because the
     /// demo mode doesn't need it; serve mode fails fast when it is absent.
     pub listen_addr: Option<String>,
     /// Maximum cached query results before LRU eviction (default 1024).
     pub cache_max_entries: usize,
+    /// Estimated Arrow batches and key bytes retained by the result cache.
+    pub cache_max_bytes: usize,
     /// How long a cached result stays valid (default 300s).
     pub cache_ttl: std::time::Duration,
     /// How often serve mode polls the CDC location for new events
@@ -153,6 +165,17 @@ pub struct Config {
 }
 
 impl Config {
+    /// Parse configuration with an explicit environment lookup. Useful for
+    /// embedding and tests without mutating global process environment.
+    pub fn from_toml(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let file = toml::from_str(raw).map_err(|error: toml::de::Error| {
+            IglooError::Config(format!(
+                "invalid TOML at byte {:?}: check field names, syntax and value types",
+                error.span().map(|span| span.start)
+            ))
+        })?;
+        Self::from_sources(file, env)
+    }
     /// Loads configuration from the config file (if any) and the process
     /// environment, environment taking precedence.
     pub fn load() -> Result<Self> {
@@ -168,15 +191,17 @@ impl Config {
         if !Path::new(&path).exists() {
             if explicit {
                 return Err(IglooError::Config(format!(
-                    "config file {:?} (from IGLOO_CONFIG) does not exist",
-                    path
+                    "config file {path:?} (from IGLOO_CONFIG) does not exist"
                 )));
             }
             return Ok(FileConfig::default());
         }
         let raw = std::fs::read_to_string(&path)?;
-        toml::from_str(&raw)
-            .map_err(|e| IglooError::Config(format!("invalid config file {:?}: {}", path, e)))
+        toml::from_str(&raw).map_err(|error| {
+            // TOML errors can quote the original line, including passwords.
+            // Keep the position without echoing configuration contents.
+            IglooError::Config(format!("invalid config file {path:?} at byte {:?}: check field names, syntax and value types", error.span().map(|span| span.start)))
+        })
     }
 
     /// Resolves the final configuration from a parsed file and an
@@ -189,20 +214,32 @@ impl Config {
             postgres_uri: file_postgres_uri,
             postgres_schemas: file_postgres_schemas,
             sources: file_sources,
+            mut adbc_sources,
+            parquet_sources,
             listen_addr: file_listen_addr,
             cache_max_entries: file_cache_max_entries,
+            cache_max_bytes: file_cache_max_bytes,
             cache_ttl_seconds: file_cache_ttl_seconds,
             cdc_poll_seconds: file_cdc_poll_seconds,
         } = file;
 
-        let parquet_path = env("IGLOO_PARQUET_PATH")
-            .or(file_parquet_path)
-            .ok_or_else(|| missing("parquet_path", "IGLOO_PARQUET_PATH"))?;
-        let cdc_path = env("IGLOO_CDC_PATH")
-            .or(file_cdc_path)
-            .ok_or_else(|| missing("cdc_path", "IGLOO_CDC_PATH"))?;
-        let postgres_sources =
-            resolve_postgres_sources(file_sources, file_postgres_uri, file_postgres_schemas, &env)?;
+        let parquet_path = env("IGLOO_PARQUET_PATH").or(file_parquet_path);
+        let cdc_path = env("IGLOO_CDC_PATH").or(file_cdc_path);
+        let has_other_sources = !adbc_sources.is_empty() || !parquet_sources.is_empty();
+        // An explicit non-Postgres source configuration must not accidentally
+        // connect to an ambient DATABASE_URL belonging to another application.
+        let postgres_sources = if has_other_sources
+            && file_sources.is_none()
+            && file_postgres_uri.is_none()
+            && file_postgres_schemas.is_none()
+        {
+            Vec::new()
+        } else {
+            resolve_postgres_sources(file_sources, file_postgres_uri, file_postgres_schemas, &env)?
+        };
+        for source in &mut adbc_sources {
+            source.resolve(&env)?;
+        }
         let listen_addr = env("IGLOO_LISTEN_ADDR").or(file_listen_addr);
         let cache_max_entries = env_u64(&env, "IGLOO_CACHE_MAX_ENTRIES")?
             .or(file_cache_max_entries)
@@ -210,6 +247,9 @@ impl Config {
         let cache_ttl_seconds = env_u64(&env, "IGLOO_CACHE_TTL_SECONDS")?
             .or(file_cache_ttl_seconds)
             .unwrap_or(DEFAULT_CACHE_TTL_SECONDS);
+        let cache_max_bytes = env_u64(&env, "IGLOO_CACHE_MAX_BYTES")?
+            .or(file_cache_max_bytes)
+            .unwrap_or(crate::cache_layer::DEFAULT_CACHE_MAX_BYTES as u64);
         let cdc_poll_seconds = env_u64(&env, "IGLOO_CDC_POLL_SECONDS")?
             .or(file_cdc_poll_seconds)
             .unwrap_or(DEFAULT_CDC_POLL_SECONDS);
@@ -218,8 +258,15 @@ impl Config {
             parquet_path,
             cdc_path,
             postgres_sources,
+            adbc_sources,
+            parquet_sources,
             listen_addr,
-            cache_max_entries: cache_max_entries as usize,
+            cache_max_entries: usize::try_from(cache_max_entries).map_err(|_| {
+                IglooError::Config("cache_max_entries exceeds this platform's capacity".into())
+            })?,
+            cache_max_bytes: usize::try_from(cache_max_bytes).map_err(|_| {
+                IglooError::Config("cache_max_bytes exceeds this platform's capacity".into())
+            })?,
             cache_ttl: std::time::Duration::from_secs(cache_ttl_seconds),
             cdc_poll_interval: std::time::Duration::from_secs(cdc_poll_seconds),
         };
@@ -228,18 +275,49 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.parquet_path.trim().is_empty() {
+        if self
+            .parquet_path
+            .as_ref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
             return Err(IglooError::Config("parquet_path must not be empty".into()));
         }
-        if self.cdc_path.trim().is_empty() {
+        if self
+            .cdc_path
+            .as_ref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
             return Err(IglooError::Config("cdc_path must not be empty".into()));
         }
         self.validate_sources()?;
+        let mut names: std::collections::HashSet<&str> = self
+            .postgres_sources
+            .iter()
+            .map(|source| source.name.as_str())
+            .collect();
+        for name in self
+            .adbc_sources
+            .iter()
+            .map(|source| source.name.as_str())
+            .chain(
+                self.parquet_sources
+                    .iter()
+                    .map(|source| source.name.as_str()),
+            )
+        {
+            if !names.insert(name) {
+                return Err(IglooError::Config(format!(
+                    "duplicate source name {name:?}: names must be unique across connector types"
+                )));
+            }
+        }
+        for source in &self.parquet_sources {
+            source.validate()?;
+        }
         if let Some(addr) = &self.listen_addr {
             addr.parse::<std::net::SocketAddr>().map_err(|e| {
                 IglooError::Config(format!(
-                    "listen_addr {:?} is not a valid socket address (host:port): {}",
-                    addr, e
+                    "listen_addr {addr:?} is not a valid socket address (host:port): {e}"
                 ))
             })?;
         }
@@ -251,6 +329,11 @@ impl Config {
         if self.cache_ttl.is_zero() {
             return Err(IglooError::Config(
                 "cache_ttl_seconds must be positive".into(),
+            ));
+        }
+        if self.cache_max_bytes == 0 {
+            return Err(IglooError::Config(
+                "cache_max_bytes must be positive".into(),
             ));
         }
         if self.cdc_poll_interval.is_zero() {
@@ -266,10 +349,13 @@ impl Config {
     /// message names the offending source so a multi-source file is
     /// debuggable.
     fn validate_sources(&self) -> Result<()> {
-        if self.postgres_sources.is_empty() {
+        if self.postgres_sources.is_empty()
+            && self.adbc_sources.is_empty()
+            && self.parquet_sources.is_empty()
+        {
             return Err(IglooError::Config(
-                "at least one PostgreSQL source must be configured \
-                 (postgres_uri, or a [[sources]] entry)"
+                "at least one source must be configured \
+                 (native PostgreSQL, adbc_sources, or parquet_sources)"
                     .into(),
             ));
         }
@@ -324,12 +410,10 @@ impl Config {
         Ok(())
     }
 
-    /// The primary source: the first configured one. It owns the unqualified
-    /// table names in the default catalog, and single-source callers (the
-    /// demo binary, the ADBC example) use it.
-    pub fn primary_source(&self) -> &PostgresSource {
-        // Validation guarantees a non-empty list.
-        &self.postgres_sources[0]
+    /// The first native PostgreSQL source, if configured. Other connector
+    /// families do not require a PostgreSQL source.
+    pub fn primary_source(&self) -> Option<&PostgresSource> {
+        self.postgres_sources.first()
     }
 
     /// The listen address, required in serve mode.
@@ -452,12 +536,11 @@ fn source_env(env: &impl Fn(&str) -> Option<String>, name: &str, suffix: &str) -
 /// A source name must be usable as an unquoted SQL catalog name: DataFusion
 /// folds unquoted identifiers to lowercase, so an uppercase name would be
 /// unreachable as `<source>.<schema>.<table>`.
-fn validate_source_name(name: &str) -> Result<()> {
+pub(crate) fn validate_source_name(name: &str) -> Result<()> {
     let invalid = |reason: &str| {
         IglooError::Config(format!(
-            "invalid source name {:?}: {} (use lowercase letters, digits and \
-             underscores, starting with a letter)",
-            name, reason
+            "invalid source name {name:?}: {reason} (use lowercase letters, digits and \
+             underscores, starting with a letter)"
         ))
     };
     let mut chars = name.chars();
@@ -470,12 +553,11 @@ fn validate_source_name(name: &str) -> Result<()> {
     }
     if let Some(bad) = chars.find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_'))
     {
-        return Err(invalid(&format!("{:?} is not allowed", bad)));
+        return Err(invalid(&format!("{bad:?} is not allowed")));
     }
     if RESERVED_SOURCE_NAMES.contains(&name) {
         return Err(IglooError::Config(format!(
-            "invalid source name {:?}: it is reserved by the query engine",
-            name
+            "invalid source name {name:?}: it is reserved by the query engine"
         )));
     }
     Ok(())
@@ -497,10 +579,7 @@ fn env_u64(env: &impl Fn(&str) -> Option<String>, key: &str) -> Result<Option<u6
     env(key)
         .map(|raw| {
             raw.parse::<u64>().map_err(|_| {
-                IglooError::Config(format!(
-                    "{} must be a non-negative integer, got {:?}",
-                    key, raw
-                ))
+                IglooError::Config(format!("{key} must be a non-negative integer, got {raw:?}"))
             })
         })
         .transpose()
@@ -508,8 +587,7 @@ fn env_u64(env: &impl Fn(&str) -> Option<String>, key: &str) -> Result<Option<u6
 
 fn missing(key: &str, how: &str) -> IglooError {
     IglooError::Config(format!(
-        "missing required configuration: {} (set {}, or {} in igloo.toml)",
-        key, how, key
+        "missing required configuration: {key} (set {how}, or {key} in igloo.toml)"
     ))
 }
 
@@ -528,8 +606,11 @@ mod tests {
             postgres_uri: Some("postgres://u:p@db:5432/mydb".into()),
             postgres_schemas: None,
             sources: None,
+            adbc_sources: Vec::new(),
+            parquet_sources: Vec::new(),
             listen_addr: None,
             cache_max_entries: None,
+            cache_max_bytes: None,
             cache_ttl_seconds: None,
             cdc_poll_seconds: None,
         }
@@ -556,7 +637,7 @@ mod tests {
 
     /// The primary source's connection string, for brevity in assertions.
     fn primary_uri(config: &Config) -> &str {
-        config.primary_source().uri.expose()
+        config.primary_source().unwrap().uri.expose()
     }
 
     #[test]
@@ -566,9 +647,9 @@ mod tests {
             ..full_file()
         };
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-        assert!(err.contains("postgres_uri"), "got: {}", err);
-        assert!(err.contains("IGLOO_POSTGRES_URI"), "got: {}", err);
-        assert!(err.contains("DATABASE_URL"), "got: {}", err);
+        assert!(err.contains("postgres_uri"), "got: {err}");
+        assert!(err.contains("IGLOO_POSTGRES_URI"), "got: {err}");
+        assert!(err.contains("DATABASE_URL"), "got: {err}");
     }
 
     #[test]
@@ -577,8 +658,8 @@ mod tests {
             (key == "IGLOO_PARQUET_PATH").then(|| "/env/parquet".to_string())
         })
         .unwrap();
-        assert_eq!(config.parquet_path, "/env/parquet");
-        assert_eq!(config.cdc_path, "/data/cdc");
+        assert_eq!(config.parquet_path.as_deref(), Some("/env/parquet"));
+        assert_eq!(config.cdc_path.as_deref(), Some("/data/cdc"));
     }
 
     #[test]
@@ -595,7 +676,7 @@ mod tests {
     #[test]
     fn file_alone_is_sufficient() {
         let config = Config::from_sources(full_file(), no_env).unwrap();
-        assert_eq!(config.parquet_path, "/data/parquet");
+        assert_eq!(config.parquet_path.as_deref(), Some("/data/parquet"));
         assert_eq!(primary_uri(&config), "postgres://u:p@db:5432/mydb");
     }
 
@@ -606,8 +687,8 @@ mod tests {
             ..full_file()
         };
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-        assert!(err.contains("uri"), "got: {}", err);
-        assert!(err.contains(DEFAULT_SOURCE_NAME), "got: {}", err);
+        assert!(err.contains("uri"), "got: {err}");
+        assert!(err.contains(DEFAULT_SOURCE_NAME), "got: {err}");
     }
 
     #[test]
@@ -615,7 +696,7 @@ mod tests {
         let absent = Config::from_sources(full_file(), no_env).unwrap();
         assert!(absent.listen_addr.is_none());
         let err = absent.require_listen_addr().unwrap_err().to_string();
-        assert!(err.contains("IGLOO_LISTEN_ADDR"), "got: {}", err);
+        assert!(err.contains("IGLOO_LISTEN_ADDR"), "got: {err}");
 
         let valid = Config::from_sources(full_file(), |key| {
             (key == "IGLOO_LISTEN_ADDR").then(|| "127.0.0.1:5442".to_string())
@@ -627,31 +708,59 @@ mod tests {
             (key == "IGLOO_LISTEN_ADDR").then(|| "not-an-address".to_string())
         });
         let err = invalid.unwrap_err().to_string();
-        assert!(err.contains("listen_addr"), "got: {}", err);
+        assert!(err.contains("listen_addr"), "got: {err}");
     }
 
     #[test]
     fn cache_settings_default_and_override() {
         let defaults = Config::from_sources(full_file(), no_env).unwrap();
         assert_eq!(defaults.cache_max_entries, 1024);
+        assert_eq!(
+            defaults.cache_max_bytes,
+            crate::cache_layer::DEFAULT_CACHE_MAX_BYTES
+        );
         assert_eq!(defaults.cache_ttl.as_secs(), 300);
         assert_eq!(defaults.cdc_poll_interval.as_secs(), 10);
 
         let file = FileConfig {
             cache_max_entries: Some(8),
+            cache_max_bytes: Some(4096),
             cache_ttl_seconds: Some(30),
             ..full_file()
         };
-        let overridden = Config::from_sources(file, |key| {
-            (key == "IGLOO_CACHE_MAX_ENTRIES").then(|| "16".to_string())
+        let overridden = Config::from_sources(file, |key| match key {
+            "IGLOO_CACHE_MAX_ENTRIES" => Some("16".to_string()),
+            "IGLOO_CACHE_MAX_BYTES" => Some("8192".to_string()),
+            _ => None,
         })
         .unwrap();
         assert_eq!(overridden.cache_max_entries, 16, "env beats file");
+        assert_eq!(
+            overridden.cache_max_bytes, 8192,
+            "byte-budget env beats file"
+        );
         assert_eq!(overridden.cache_ttl.as_secs(), 30, "file beats default");
     }
 
     #[test]
     fn invalid_cache_settings_are_rejected() {
+        let err = Config::from_sources(
+            FileConfig {
+                cache_max_bytes: Some(0),
+                ..full_file()
+            },
+            no_env,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cache_max_bytes"), "got: {err}");
+
+        let err = Config::from_sources(full_file(), |key| {
+            (key == "IGLOO_CACHE_MAX_BYTES").then(|| "unlimited".to_string())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("IGLOO_CACHE_MAX_BYTES"), "got: {err}");
         let zero_capacity = FileConfig {
             cache_max_entries: Some(0),
             ..full_file()
@@ -659,13 +768,13 @@ mod tests {
         let err = Config::from_sources(zero_capacity, no_env)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("cache_max_entries"), "got: {}", err);
+        assert!(err.contains("cache_max_entries"), "got: {err}");
 
         let bad_env = Config::from_sources(full_file(), |key| {
             (key == "IGLOO_CACHE_TTL_SECONDS").then(|| "soon".to_string())
         });
         let err = bad_env.unwrap_err().to_string();
-        assert!(err.contains("IGLOO_CACHE_TTL_SECONDS"), "got: {}", err);
+        assert!(err.contains("IGLOO_CACHE_TTL_SECONDS"), "got: {err}");
     }
 
     // --- single-source (flat) form ------------------------------------------
@@ -674,7 +783,7 @@ mod tests {
     fn flat_keys_become_one_source_named_postgres() {
         let config = Config::from_sources(full_file(), no_env).unwrap();
         assert_eq!(config.postgres_sources.len(), 1);
-        let source = config.primary_source();
+        let source = config.primary_source().unwrap();
         assert_eq!(source.name, DEFAULT_SOURCE_NAME);
         assert_eq!(source.schemas, vec!["public".to_string()]);
         assert!(source.tables.is_none(), "no allowlist by default");
@@ -683,7 +792,10 @@ mod tests {
     #[test]
     fn postgres_schemas_defaults_to_public() {
         let config = Config::from_sources(full_file(), no_env).unwrap();
-        assert_eq!(config.primary_source().schemas, vec!["public".to_string()]);
+        assert_eq!(
+            config.primary_source().unwrap().schemas,
+            vec!["public".to_string()]
+        );
     }
 
     #[test]
@@ -693,7 +805,10 @@ mod tests {
             ..full_file()
         };
         let config = Config::from_sources(file, no_env).unwrap();
-        assert_eq!(config.primary_source().schemas, vec!["public", "analytics"]);
+        assert_eq!(
+            config.primary_source().unwrap().schemas,
+            vec!["public", "analytics"]
+        );
     }
 
     #[test]
@@ -707,7 +822,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            config.primary_source().schemas,
+            config.primary_source().unwrap().schemas,
             vec!["public", "analytics", "reporting"],
             "env wins, is trimmed and split on commas"
         );
@@ -720,7 +835,7 @@ mod tests {
             ..full_file()
         };
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-        assert!(err.contains("schemas"), "got: {}", err);
+        assert!(err.contains("schemas"), "got: {err}");
 
         // An env value of only commas/whitespace collapses to empty and is
         // rejected too, rather than silently falling back to a default.
@@ -729,7 +844,7 @@ mod tests {
         })
         .unwrap_err()
         .to_string();
-        assert!(err.contains("schemas"), "got: {}", err);
+        assert!(err.contains("schemas"), "got: {err}");
     }
 
     // --- multi-source ([[sources]]) form -------------------------------------
@@ -752,7 +867,7 @@ mod tests {
             .map(|s| s.name.as_str())
             .collect();
         assert_eq!(names, vec!["orders_db", "crm"], "configured order kept");
-        assert_eq!(config.primary_source().name, "orders_db");
+        assert_eq!(config.primary_source().unwrap().name, "orders_db");
         assert_eq!(
             config.postgres_sources[0].schemas,
             vec!["public", "billing"]
@@ -781,7 +896,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(primary_uri(&config), "postgres://from-env/orders");
-        assert_eq!(config.primary_source().schemas, vec!["public", "billing"]);
+        assert_eq!(
+            config.primary_source().unwrap().schemas,
+            vec!["public", "billing"]
+        );
     }
 
     #[test]
@@ -798,8 +916,8 @@ mod tests {
     fn source_without_uri_anywhere_names_the_env_key() {
         let file = sources_file(vec![source_entry("orders_db", None)]);
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-        assert!(err.contains("orders_db"), "got: {}", err);
-        assert!(err.contains("IGLOO_SOURCE_ORDERS_DB_URI"), "got: {}", err);
+        assert!(err.contains("orders_db"), "got: {err}");
+        assert!(err.contains("IGLOO_SOURCE_ORDERS_DB_URI"), "got: {err}");
     }
 
     #[test]
@@ -809,8 +927,8 @@ mod tests {
             ..full_file() // still carries postgres_uri
         };
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-        assert!(err.contains("[[sources]]"), "got: {}", err);
-        assert!(err.contains("postgres_uri"), "got: {}", err);
+        assert!(err.contains("[[sources]]"), "got: {err}");
+        assert!(err.contains("postgres_uri"), "got: {err}");
     }
 
     #[test]
@@ -831,7 +949,7 @@ mod tests {
         let err = Config::from_sources(sources_file(vec![]), no_env)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("sources"), "got: {}", err);
+        assert!(err.contains("sources"), "got: {err}");
     }
 
     #[test]
@@ -841,8 +959,8 @@ mod tests {
             source_entry("crm", Some("postgres://b@db/two")),
         ]);
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-        assert!(err.contains("duplicate source name"), "got: {}", err);
-        assert!(err.contains("crm"), "got: {}", err);
+        assert!(err.contains("duplicate source name"), "got: {err}");
+        assert!(err.contains("crm"), "got: {err}");
     }
 
     #[test]
@@ -855,17 +973,15 @@ mod tests {
                 .to_lowercase();
             assert!(
                 err.contains("source name"),
-                "name {:?} should be rejected; got: {}",
-                bad,
-                err
+                "name {bad:?} should be rejected; got: {err}"
             );
         }
         // Legal names round-trip.
         for good in ["crm", "orders_db", "pg2"] {
             let file = sources_file(vec![source_entry(good, Some("postgres://a@db/one"))]);
             let config = Config::from_sources(file, no_env)
-                .unwrap_or_else(|e| panic!("name {:?} should be accepted: {}", good, e));
-            assert_eq!(config.primary_source().name, good);
+                .unwrap_or_else(|e| panic!("name {good:?} should be accepted: {e}"));
+            assert_eq!(config.primary_source().unwrap().name, good);
         }
     }
 
@@ -874,7 +990,7 @@ mod tests {
         for reserved in ["datafusion", "information_schema"] {
             let file = sources_file(vec![source_entry(reserved, Some("postgres://a@db/one"))]);
             let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-            assert!(err.contains("reserved"), "got: {}", err);
+            assert!(err.contains("reserved"), "got: {err}");
         }
     }
 
@@ -882,7 +998,7 @@ mod tests {
     fn source_names_are_trimmed_before_validation() {
         let file = sources_file(vec![source_entry("  crm  ", Some("postgres://a@db/one"))]);
         let config = Config::from_sources(file, no_env).unwrap();
-        assert_eq!(config.primary_source().name, "crm");
+        assert_eq!(config.primary_source().unwrap().name, "crm");
     }
 
     #[test]
@@ -892,22 +1008,22 @@ mod tests {
             ..source_entry("crm", Some("postgres://a@db/one"))
         }]);
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-        assert!(err.contains("tables"), "got: {}", err);
+        assert!(err.contains("tables"), "got: {err}");
 
         let file = sources_file(vec![FileSource {
             tables: Some(vec!["  ".into()]),
             ..source_entry("crm", Some("postgres://a@db/one"))
         }]);
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-        assert!(err.contains("tables"), "got: {}", err);
+        assert!(err.contains("tables"), "got: {err}");
     }
 
     #[test]
     fn invalid_source_uri_names_the_source() {
         let file = sources_file(vec![source_entry("crm", Some("nonsense"))]);
         let err = Config::from_sources(file, no_env).unwrap_err().to_string();
-        assert!(err.contains("crm"), "got: {}", err);
-        assert!(err.contains("uri"), "got: {}", err);
+        assert!(err.contains("crm"), "got: {err}");
+        assert!(err.contains("uri"), "got: {err}");
     }
 
     #[test]
@@ -964,12 +1080,12 @@ mod tests {
     #[test]
     fn secret_never_leaks_in_debug_display_or_config_debug() {
         let secret = Secret::new("postgres://user:hunter2@db/igloo");
-        assert_eq!(format!("{:?}", secret), "Secret(***)");
-        assert_eq!(format!("{}", secret), "***");
+        assert_eq!(format!("{secret:?}"), "Secret(***)");
+        assert_eq!(format!("{secret}"), "***");
 
         let config = Config::from_sources(full_file(), no_env).unwrap();
-        let debug = format!("{:?}", config);
-        assert!(!debug.contains("u:p@"), "credentials leaked: {}", debug);
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("u:p@"), "credentials leaked: {debug}");
 
         // Per-source URIs are redacted too, not just a top-level field.
         let file = sources_file(vec![source_entry(
@@ -977,14 +1093,13 @@ mod tests {
             Some("postgres://user:hunter2@db/crm"),
         )]);
         let config = Config::from_sources(file, no_env).unwrap();
-        let debug = format!("{:?}", config);
-        assert!(!debug.contains("hunter2"), "credentials leaked: {}", debug);
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("hunter2"), "credentials leaked: {debug}");
         // The source itself must be safe to log on its own.
-        let source_debug = format!("{:?}", config.primary_source());
+        let source_debug = format!("{:?}", config.primary_source().unwrap());
         assert!(
             !source_debug.contains("hunter2"),
-            "credentials leaked: {}",
-            source_debug
+            "credentials leaked: {source_debug}"
         );
     }
 

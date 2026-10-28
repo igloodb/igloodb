@@ -83,17 +83,17 @@ pub fn translate_filter(expr: &Expr, schema: &Schema) -> Option<String> {
                 // both sides must translate or the whole thing is unsupported.
                 let l = translate_filter(left, schema)?;
                 let r = translate_filter(right, schema)?;
-                Some(format!("({} AND {})", l, r))
+                Some(format!("({l} AND {r})"))
             }
             _ => translate_comparison(left, *op, right, schema),
         },
         Expr::IsNull(inner) => {
             let col = column_sql(as_column(inner)?, schema)?;
-            Some(format!("{} IS NULL", col))
+            Some(format!("{col} IS NULL"))
         }
         Expr::IsNotNull(inner) => {
             let col = column_sql(as_column(inner)?, schema)?;
-            Some(format!("{} IS NOT NULL", col))
+            Some(format!("{col} IS NOT NULL"))
         }
         Expr::InList(InList {
             expr,
@@ -119,7 +119,7 @@ fn translate_comparison(
         }
         let col = column_sql(col, schema)?;
         let lit = literal_sql(lit)?;
-        return Some(format!("{} {} {}", col, sql_op, lit));
+        return Some(format!("{col} {sql_op} {lit}"));
     }
     // literal <op> column  → flip the operator so the column stays on the left
     if let (Some(lit), Some(col)) = (as_literal(left), as_column(right)) {
@@ -129,7 +129,7 @@ fn translate_comparison(
         let flipped = comparison_op_sql(flip_operator(op))?;
         let col = column_sql(col, schema)?;
         let lit = literal_sql(lit)?;
-        return Some(format!("{} {} {}", col, flipped, lit));
+        return Some(format!("{col} {flipped} {lit}"));
     }
     None
 }
@@ -260,7 +260,7 @@ fn literal_sql(v: &ScalarValue) -> Option<String> {
 /// Render a finite float as a SQL numeric literal; `None` for NaN/inf.
 fn finite_float_sql(f: f64) -> Option<String> {
     if f.is_finite() {
-        Some(format!("{}", f))
+        Some(format!("{f}"))
     } else {
         None
     }
@@ -507,7 +507,7 @@ mod tests {
                 continue; // rejected — trivially safe
             };
             let prefix = "\"name\" = ";
-            assert!(sql.starts_with(prefix), "unexpected prefix in {:?}", sql);
+            assert!(sql.starts_with(prefix), "unexpected prefix in {sql:?}");
             let literal = &sql[prefix.len()..];
             assert_structurally_safe_literal(literal, input);
         }
@@ -519,8 +519,7 @@ mod tests {
     fn assert_structurally_safe_literal(literal: &str, original: &str) {
         assert!(
             literal.starts_with('\'') && literal.ends_with('\'') && literal.len() >= 2,
-            "literal {:?} is not single-quote wrapped",
-            literal
+            "literal {literal:?} is not single-quote wrapped"
         );
         let inner = &literal[1..literal.len() - 1];
         // Every single quote in the interior must be doubled. Walk it and
@@ -532,8 +531,7 @@ mod tests {
                 assert_eq!(
                     chars.next(),
                     Some('\''),
-                    "lone single quote inside literal {:?} would end it early",
-                    literal
+                    "lone single quote inside literal {literal:?} would end it early"
                 );
                 decoded.push('\'');
             } else {
@@ -542,8 +540,7 @@ mod tests {
         }
         assert_eq!(
             decoded, original,
-            "literal {:?} does not decode back to input {:?}",
-            literal, original
+            "literal {literal:?} does not decode back to input {original:?}"
         );
     }
 

@@ -1,11 +1,85 @@
-# 🍙 Igloo
+# Igloo
 
-Igloo is an experimental, single-node SQL query engine with an intelligent caching layer, built in Rust. It connects to external databases via ADBC drivers, leveraging DataFusion for query execution and Apache Arrow for in-memory data representation. Igloo caches query results and keeps them up to date using Change Data Capture (CDC) stored in the Iceberg format.
+**SQL federation for developers and AI agents.** Igloo is an experimental,
+single-node Rust engine that connects databases through native PostgreSQL and
+compatible ADBC drivers, and reads named Parquet snapshots with inferred schemas.
+Apache DataFusion and Apache Arrow provide a shared query layer. Use native MCP, a JSON CLI,
+the Rust library, or PostgreSQL drivers. No LLM API key is required.
+
+## Start with an agent
+
+Build this checkout with Rust 1.88+. The first build compiles DataFusion.
+The agent interfaces in this branch may not yet be available in published releases.
+
+```sh
+cargo build --locked
+./target/debug/igloo schema --demo
+./target/debug/igloo query --demo --sql 'SELECT event, count(*) AS total FROM sample_events GROUP BY event'
+./target/debug/igloo mcp --demo
+```
+
+The in-memory demo needs no database, files, credentials, configuration or ADBC
+driver. Configure the built binary as a stdio subprocess in an MCP client:
+
+```json
+{
+  "mcpServers": {
+    "igloo": {
+      "command": "/absolute/path/to/igloodb/target/debug/igloo",
+      "args": ["mcp", "--demo"]
+    }
+  }
+}
+```
+
+The tools are `igloo_capabilities`, `igloo_connectors`, `igloo_schema`,
+`igloo_explain`, and `igloo_query`. Agent queries are read-only, bypass the result cache, return typed
+JSON with exact integer/decimal strings, and have row, time and response limits.
+For shell agents, `query --json` reads a request from stdin and emits one JSON
+document; failures exit 2 with an error code and hint.
+
+Read the [agent guide](docs/AGENTS.md) for Codex and other client configurations,
+existing-source setup, Python/JavaScript examples, and the precise limits.
+The [copyable query skill](skills/igloo-query/SKILL.md) and [llms.txt](llms.txt)
+provide text context for agents. See the [market analysis](docs/MARKET_ANALYSIS.md)
+for the positioning, competitive landscape, and prioritized next steps.
+
+**Broad database connectivity:** the [connector guide](docs/CONNECTORS.md) explains
+the native, ADBC and Parquet routes, configuration, and the database validation
+matrix. PostgreSQL and SQLite ADBC 1.7.0 have live integration coverage; other
+compatible drivers are candidates awaiting database-specific validation. Run
+`igloo connectors` or call `igloo_connectors` for machine-readable coverage.
+The goal is broad support across databases, warehouses and lakehouses, with
+replication/CDC and JDBC/ODBC or native bridges as separate integration paths.
+
+**Current limitations:** No real Iceberg integration, vector search, persistent agent memory,
+or per-user source authorization. Experimental HTTP MCP uses a shared team token
+and requires operator-provided TLS for remote access. The separate pgwire endpoint is unauthenticated
+plaintext. Query response limits do not bound upstream scans/memory or guarantee
+upstream cancellation; independent sources do not share a consistent snapshot.
 
 
 ## 🏗️ How Igloo Works
 
-- **Data Querying:** Apache DataFusion queries PostgreSQL through a custom `TableProvider` built on `tokio-postgres`, with conservative filter pushdown (exactly-equivalent predicates only) translated into the generated SQL. A separate, experimental ADBC FFI path also exists as a standalone example — it is not wired into DataFusion.
+### Unreleased implementation work
+
+This source preview adds authenticated Streamable HTTP MCP for a trusted
+team (`igloo mcp-http`), a native PostgreSQL logical-replication probe
+(`igloo cdc-check`), and byte-bounded result caching with invalidation-safe fills.
+These changes are experimental and are not a tagged release. Agent queries still
+bypass the result cache. Native CDC is a tested building block and operator
+diagnostic; it is not yet connected to query-cache validation or incremental
+materializations. See the [agent guide](docs/AGENTS.md),
+[CDC guide](docs/CDC.md), and [delivery plan](docs/PROJECT_PLAN.md).
+The [implementation status](docs/IMPLEMENTATION_STATUS.md) records exact checks
+and remaining release blockers.
+
+The dependency advisory gate remains blocked by the existing DataFusion/Parquet
+compression dependency constraints. Compatible Tokio and Rustls fixes are applied;
+the remaining zstd advisories are not suppressed. Do not treat this tree as a
+production release.
+
+- **Data Querying:** Native PostgreSQL uses a custom `tokio-postgres` provider with conservative filter pushdown. Generic ADBC sources discover tables through standard metadata and stream Arrow batches into DataFusion through a separate provider. The legacy `adbc_postgres.rs` smoke example remains a standalone demonstration.
 - **Materialized Views & Auto-Cache:** Today the "iceberg" table is a plain directory of Parquet files (no Iceberg manifests, snapshots, or materialized views), and cache-invalidating change events are a directory of JSON files. Real Apache Iceberg integration is planned — see Roadmap.
 - **Smart Caching:** Query results are cached in memory (with pluggable backends planned), and cache invalidation/refresh is driven by Change Data Capture (CDC) events read from JSON files (real Iceberg-based CDC is planned — see Roadmap).
 
@@ -13,27 +87,17 @@ Igloo is an experimental, single-node SQL query engine with an intelligent cachi
 
 ```mermaid
 flowchart LR
-    subgraph DataSources["Relational DB Sources"]
-        PG["Postgres"]
-        MY["MySQL"]
-        MSSQL["SQL Server"]
-        JDBC["Generic JDBC"]
-    end
-    PG --> IGLOO
-    MY --> IGLOO
-    MSSQL --> IGLOO
-    JDBC --> IGLOO
-    subgraph IGLOO["Igloo"]
-        CACHE["Smart Cache"]
-        ENGINE["Query Engine (DataFusion)"]
-        CDC["CDC Listener"]
-    end
-    IGLOO --> CACHE
-    IGLOO --> ENGINE
-    IGLOO --> CDC
-    CACHE -- "Fresh/Hot Data" --> ANALYTICS["Real-time Analytics"]
-    ENGINE -- "Query Results" --> ANALYTICS
-    CDC -- "Change Events" --> CACHE
+    AGENTS["AI agents / developers"] --> MCP["Native stdio MCP / JSON CLI"]
+    MCP --> POLICY["Read-only policy + result budgets"]
+    POLICY --> ENGINE["DataFusion + Arrow"]
+    CLIENT["SQL clients"] --> PGWIRE["PostgreSQL wire protocol"]
+    PGWIRE --> CACHE["LRU + TTL cache"]
+    CACHE --> ENGINE
+    CDC["JSON-file change events"] -->|invalidate| CACHE
+    ENGINE --> PG1["PostgreSQL source A"]
+    ENGINE --> PG2["PostgreSQL source B"]
+    ENGINE --> ADBC["Compatible ADBC database drivers"]
+    ENGINE --> PARQUET["Named local Parquet / inferred schemas"]
 ```
 
 - 🧠 **Query Engine:** Apache DataFusion — Arrow-native SQL execution
@@ -43,33 +107,16 @@ flowchart LR
 
 ## 🚀 Running the Project
 
-There are two primary ways to run Igloo: using Docker Compose (recommended for ease of setup) or running it locally.
+Use the source-based agent quickstart above for the shortest supported workflow.
+For the legacy application demonstration, the local setup below needs PostgreSQL
+and a separate ADBC driver.
 
-### Using Docker Compose
+### Docker Compose status
 
-This is the simplest way to get Igloo and its PostgreSQL dependency running.
-
-1.  **Ensure Docker and Docker Compose are installed.**
-2.  From the project root, run:
-    ```sh
-    docker-compose up -d --build
-    ```
-    This command will:
-    *   Build the Igloo Docker image.
-    *   Start a PostgreSQL container.
-    *   Start the Igloo application container.
-    *   Run services in detached mode (`-d`).
-
-    The Igloo service's environment variables (like database connection strings and paths) are pre-configured in the `docker-compose.yml` file to work within the Docker network.
-
-3.  To view logs:
-    ```sh
-    docker-compose logs -f igloo
-    ```
-4.  To stop the services:
-    ```sh
-    docker-compose down
-    ```
+The checked-in Docker/Compose files predate the current agent interface: the
+builder uses Rust 1.87 while this crate requires 1.88, and the default command
+runs the legacy ADBC demonstration rather than a server. They are not a validated
+agent quickstart. Use the source build while container packaging is updated.
 
 ### Locally (without Docker)
 
@@ -79,7 +126,7 @@ Running Igloo locally requires you to manage dependencies and environment setup 
     *   **Rust toolchain:** Install Rust (if not already installed) via [rustup.rs](https://rustup.rs/).
     *   **Running PostgreSQL instance:** You need a PostgreSQL server running and accessible.
     *   **Dummy data:** Ensure the dummy Parquet/Iceberg data (from `dummy_iceberg_cdc/`) is available at the location Igloo expects (see environment variable configuration below).
-    *   **ADBC Drivers:** Specific C++ ADBC drivers are needed. See the `LD_LIBRARY_PATH` details in the "🛠️ Environment Variable Reference" section.
+    *   **ADBC Drivers:** Needed only for the legacy plain `cargo run` demonstration. Agent commands, `serve`, and `crypto-demo` do not require a C++ ADBC driver.
 
 2.  **Configure Environment:**
     *   Copy the example environment file:
@@ -240,7 +287,7 @@ Simple `WHERE` predicates are translated to SQL and pushed down to PostgreSQL so
 
 Igloo's behavior is controlled by a small set of required settings. They can come from a TOML config file (`igloo.toml` in the working directory, or any path via `IGLOO_CONFIG` — see `igloo.example.toml`) and/or environment variables, with **environment variables taking precedence**. When running locally, environment variables can be set in a `.env` file (by copying `.env.example`) or directly in your shell. When using Docker Compose, these are set within the `docker-compose.yml` file for the `igloo` service.
 
-**Igloo fails fast:** every setting below is required, and startup aborts with an error naming the missing setting if one is absent. There are no built-in localhost defaults.
+**Igloo fails fast:** configure at least one native PostgreSQL, ADBC, or named Parquet source. Paths `parquet_path` and `cdc_path` are optional legacy features; they are required only by the old one-shot demonstration. Explicitly empty paths and invalid configuration still fail. There are no built-in localhost connection defaults. ADBC and named Parquet configuration are covered in the [connector guide](docs/CONNECTORS.md).
 
 ### General Configuration
 
@@ -275,10 +322,10 @@ Igloo's behavior is controlled by a small set of required settings. They can com
 
 ### ADBC Driver Configuration (for Local Execution)
 
-Igloo relies on ADBC C++ drivers (such as the PostgreSQL driver) via Rust's Foreign Function Interface (FFI). This is because native ADBC Rust drivers are still under active development. For local execution (not Docker), you must have these C++ driver libraries available and tell the system where to find them.
+The legacy plain `cargo run` demonstration also executes a separate ADBC FFI example. Only that path requires C++ ADBC drivers and linker configuration. Normal PostgreSQL federation uses `tokio-postgres`; agent commands, the SQL server and `crypto-demo` do not need these drivers.
 
 *   `LD_LIBRARY_PATH` (Linux/macOS):
-    *   **Purpose:** This environment variable tells the dynamic linker where to find shared libraries (like the ADBC PostgreSQL driver) when the Igloo application starts. This is **essential** if you are running Igloo directly on your host machine without Docker.
+    *   **Purpose:** This environment variable tells the dynamic linker where to find shared libraries (like the ADBC PostgreSQL driver) when the Igloo application starts. This is **required for the legacy ADBC demonstration** when running it on your host machine.
     *   **Example:**
         ```bash
         export LD_LIBRARY_PATH=/path/to/your/adbc_driver_libs:$LD_LIBRARY_PATH

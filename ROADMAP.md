@@ -1,6 +1,6 @@
 # Igloo roadmap
 
-Updated **27 October 2026**. Igloo is an experimental, single-node SQL federation
+Updated **28 October 2026**. Igloo is an experimental, single-node SQL federation
 engine built with Rust, DataFusion and Arrow. The goal is to query data across
 databases, warehouses and lakehouses through familiar SQL clients and simple
 interfaces for developers and their AI agents.
@@ -9,6 +9,13 @@ Broad database support is the direction. Each integration needs evidence for its
 types, authentication, query semantics and failure behavior before it is called
 supported. Live database access and replication into open table formats are
 separate capabilities.
+
+The agreed delivery program prioritizes reliable developer/agent workflows,
+CDC-backed caching and explicit per-source freshness. It assumes one full-time
+maintainer, a public experimental release within six months, and an 18–24 month
+production target governed by correctness and adoption gates. See the
+[complete delivery plan](docs/PROJECT_PLAN.md). Broad source coverage remains
+the expansion direction after the initial PostgreSQL workflow is validated.
 
 ## Current status
 
@@ -45,15 +52,32 @@ Preview references: [agent contract](https://github.com/igloodb/igloodb/blob/b5a
 [connector strategy and evidence](https://github.com/igloodb/igloodb/blob/b5a210d54a2e78a9a8c9497e2476061aad771d36/docs/CONNECTORS.md),
 and [market analysis](https://github.com/igloodb/igloodb/blob/b5a210d54a2e78a9a8c9497e2476061aad771d36/docs/MARKET_ANALYSIS.md).
 
+### Current implementation increment (unreleased source preview)
+
+- Authenticated Streamable HTTP MCP shares the existing agent kernel; local
+  stdio remains available. Shared clients use one trusted-team source scope.
+  TLS termination is an operator-provided reverse proxy, not built-in TLS.
+- Result cache has a configurable 64 MiB default estimated byte budget and
+  generation-fenced fills, preventing a query from repopulating after invalidation.
+- Native PostgreSQL `pgoutput` consumption and committed-marker tracking are
+  available as library building blocks and `igloo cdc-check` diagnostics.
+  They are not connected to query caching or incremental materializations.
+- Agent requests still bypass cache. Strict federated cache validation,
+  query-scoped native snapshots, publication/schema/privilege validation and
+  incremental maintenance are unfinished.
+- Compatible crypto/runtime security updates are applied. The advisory gate
+  remains blocked on zstd, zstd-safe and zstd-sys versions pinned by the existing
+  DataFusion/Parquet graph; no new advisory exceptions were introduced.
+
 ## Immediate priorities
 
 | Order | Deliverable | Evidence needed to finish |
 | --- | --- | --- |
 | 1 | Make the preview ready to merge and release | Resolve dependency advisories, retain Rust 1.88 compatibility, pass required checks and publish reproducible setup instructions |
-| 2 | Certify more live database connectors | Real driver/server tests, documented types/authentication, failure tests and at least one cross-source join per certified integration |
-| 3 | Improve agent setup and execution limits | Tested client configurations, stable JSON errors, installation path, source-side timeouts and explicit cancellation/resource behavior |
-| 4 | Read replicated lakehouse data correctly | Iceberg catalog/object-store integration, snapshot/delete/schema correctness and an OLake interoperability test |
-| 5 | Make freshness observable and enforceable | Source watermarks, dependency-aware invalidation and tested behavior during lag, disconnects and restarts |
+| 2 | Integrate native CDC with strict per-source cache validation | Committed read barriers, publication/dependency coverage, query snapshots, race-safe admission and fallback through lag/disconnect/restart |
+| 3 | Improve agent setup, shared access and execution limits | Tested clients, authenticated HTTP MCP, stable JSON errors, source timeouts/cancellation and observable budgets |
+| 4 | Add incremental maintenance beside invalidation | COUNT/SUM first; supported grouped aggregates and inner joins compared with full recomputation through mutations and recovery |
+| 5 | Expand certified source coverage | Real driver/server/auth/type/failure tests; later correct Iceberg reads and OLake interoperability |
 
 Database certification, agent usability and the Iceberg reader can progress
 independently once the release foundation is sound. A workspace split or a

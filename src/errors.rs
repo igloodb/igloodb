@@ -24,6 +24,13 @@ pub enum IglooError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("Connector {source_name:?} failed during {operation}: {reason}")]
+    Connector {
+        source_name: String,
+        operation: &'static str,
+        reason: String,
+    },
+
     #[error("Unsupported Arrow type in PostgresTable: {0:?}")]
     UnsupportedArrowType(arrow::datatypes::DataType),
 }

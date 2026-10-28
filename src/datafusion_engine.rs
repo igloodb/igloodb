@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio_postgres::{Client, NoTls};
 
 use crate::catalog::{self, SourceTables, TableSchema};
-use crate::config::PostgresSource;
+use crate::config::{Config, PostgresSource};
 use crate::errors::{IglooError, Result};
 use crate::postgres_table::PostgresTable;
 
@@ -34,6 +34,42 @@ pub struct DataFusionEngine {
 }
 
 impl DataFusionEngine {
+    /// All configured connector families share the same DataFusion catalog and
+    /// agent/pgwire interfaces. Legacy constructors below remain available.
+    pub async fn from_config(config: &Config) -> Result<Self> {
+        let ctx =
+            SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
+        if let Some(path) = &config.parquet_path {
+            Self::register_iceberg_table(&ctx, path)?;
+        }
+        Self::register_postgres_sources(&ctx, &config.postgres_sources, true).await?;
+        crate::adbc_source::register(&ctx, &config.adbc_sources).await?;
+        for source in &config.parquet_sources {
+            if ctx.catalog(&source.name).is_some() {
+                return Err(IglooError::Config(format!(
+                    "catalog {:?} already exists",
+                    source.name
+                )));
+            }
+            let catalog = Arc::new(MemoryCatalogProvider::new());
+            let schema = Arc::new(MemorySchemaProvider::new());
+            for table in &source.tables {
+                let url = ListingTableUrl::parse(&table.path)?;
+                let options = ListingOptions::new(Arc::new(ParquetFormat::default()))
+                    .with_file_extension(".parquet");
+                let arrow_schema = options.infer_schema(&ctx.state(), &url).await?;
+                let config = ListingTableConfig::new(url)
+                    .with_listing_options(options)
+                    .with_schema(arrow_schema);
+                schema
+                    .register_table(table.name.clone(), Arc::new(ListingTable::try_new(config)?))?;
+            }
+            catalog.register_schema("public", schema)?;
+            ctx.register_catalog(source.name.clone(), catalog);
+        }
+        Ok(Self { ctx })
+    }
+
     /// Builds the engine, registering the Parquet-backed `iceberg` table and
     /// every PostgreSQL base table discovered in each configured source.
     /// Filter pushdown to PostgreSQL is enabled.
@@ -208,7 +244,7 @@ impl DataFusionEngine {
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 // The URI (and any credentials in it) is never logged.
-                log::error!("PostgreSQL connection error on source {:?}: {}", name, e);
+                log::error!("PostgreSQL connection error on source {name:?}: {e}");
             }
         });
         Ok(Arc::new(client))
@@ -243,7 +279,7 @@ impl DataFusionEngine {
     }
 
     pub async fn query(&self, sql: &str) -> Result<Vec<RecordBatch>> {
-        log::debug!("Executing SQL query in DataFusion: {}", sql);
+        log::debug!("Executing SQL query in DataFusion: {sql}");
         let df = self.ctx.sql(sql).await?;
         let results = df.collect().await?;
         log::debug!(
@@ -294,7 +330,7 @@ impl DataFusionEngine {
     /// SQL, unknown tables) propagate so callers can reject statements at
     /// prepare time.
     pub async fn describe_query(&self, sql: &str) -> Result<QueryDescription> {
-        log::debug!("Planning SQL query for describe: {}", sql);
+        log::debug!("Planning SQL query for describe: {sql}");
         let df = self.ctx.sql(sql).await?;
         let schema: SchemaRef = Arc::new(ArrowSchema::from(df.schema()));
         let plan = df.logical_plan();

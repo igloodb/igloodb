@@ -9,11 +9,15 @@
 //! reached.
 
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::sql::sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+
+/// Default result-cache byte budget (64 MiB).
+pub const DEFAULT_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Canonicalizes SQL text for cache keying.
 ///
@@ -100,11 +104,18 @@ pub struct CacheStats {
     pub misses: u64,
     pub evictions_lru: u64,
     pub evictions_ttl: u64,
+    pub evictions_bytes: u64,
+    pub rejected_oversized: u64,
     pub entries: usize,
+    /// Estimated bytes held by cache entries. This counts keys and Arrow
+    /// array memory estimates; it excludes references retained outside the
+    /// cache and process/allocator overhead.
+    pub bytes: usize,
 }
 
 struct Entry {
     batches: Arc<Vec<RecordBatch>>,
+    bytes: usize,
     inserted_at: Instant,
     last_used: u64,
 }
@@ -116,6 +127,10 @@ struct Inner {
     misses: u64,
     evictions_lru: u64,
     evictions_ttl: u64,
+    evictions_bytes: u64,
+    rejected_oversized: u64,
+    bytes: usize,
+    generation: u64,
 }
 
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
@@ -124,6 +139,7 @@ type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 pub struct Cache {
     inner: Mutex<Inner>,
     max_entries: usize,
+    max_bytes: usize,
     ttl: Duration,
     clock: Clock,
 }
@@ -132,17 +148,35 @@ impl Cache {
     /// `max_entries` and `ttl` must be positive; the config layer
     /// validates user input, this asserts against internal misuse.
     pub fn new(max_entries: usize, ttl: Duration) -> Self {
-        Self::with_clock(max_entries, ttl, Arc::new(Instant::now))
+        Self::with_limits_and_clock(
+            max_entries,
+            DEFAULT_CACHE_MAX_BYTES,
+            ttl,
+            Arc::new(Instant::now),
+        )
     }
 
     /// Injectable clock so TTL behavior is testable without sleeping.
     pub fn with_clock(max_entries: usize, ttl: Duration, clock: Clock) -> Self {
+        Self::with_limits_and_clock(max_entries, DEFAULT_CACHE_MAX_BYTES, ttl, clock)
+    }
+
+    /// Creates a cache with explicit entry and estimated-byte limits.
+    pub fn with_limits(max_entries: usize, max_bytes: usize, ttl: Duration) -> Self {
+        Self::with_limits_and_clock(max_entries, max_bytes, ttl, Arc::new(Instant::now))
+    }
+
+    fn with_limits_and_clock(
+        max_entries: usize,
+        max_bytes: usize,
+        ttl: Duration,
+        clock: Clock,
+    ) -> Self {
         assert!(max_entries > 0, "cache max_entries must be positive");
+        assert!(max_bytes > 0, "cache max_bytes must be positive");
         assert!(!ttl.is_zero(), "cache ttl must be positive");
         log::debug!(
-            "Initializing cache: max_entries={}, ttl={:?}",
-            max_entries,
-            ttl
+            "Initializing cache: max_entries={max_entries}, max_bytes={max_bytes}, ttl={ttl:?}"
         );
         Self {
             inner: Mutex::new(Inner {
@@ -152,8 +186,13 @@ impl Cache {
                 misses: 0,
                 evictions_lru: 0,
                 evictions_ttl: 0,
+                evictions_bytes: 0,
+                rejected_oversized: 0,
+                bytes: 0,
+                generation: 0,
             }),
             max_entries,
+            max_bytes,
             ttl,
             clock,
         }
@@ -188,7 +227,9 @@ impl Cache {
                 Some(batches)
             }
             Lookup::Expired => {
-                inner.store.remove(&key);
+                if let Some(entry) = inner.store.remove(&key) {
+                    inner.bytes = inner.bytes.saturating_sub(entry.bytes);
+                }
                 inner.evictions_ttl += 1;
                 inner.misses += 1;
                 None
@@ -201,23 +242,65 @@ impl Cache {
     }
 
     pub fn set(&self, sql: &str, batches: Vec<RecordBatch>) {
+        self.insert(sql, batches, None);
+    }
+
+    /// Inserts a result only if no invalidation has occurred since the
+    /// caller captured `expected_generation`.
+    pub fn set_if_generation(
+        &self,
+        sql: &str,
+        batches: Vec<RecordBatch>,
+        expected_generation: u64,
+    ) -> bool {
+        self.insert(sql, batches, Some(expected_generation))
+    }
+
+    fn insert(
+        &self,
+        sql: &str,
+        batches: Vec<RecordBatch>,
+        expected_generation: Option<u64>,
+    ) -> bool {
         let key = normalize_query(sql);
+        let bytes = estimate_entry_bytes(&key, &batches);
         let now = (self.clock)();
         let mut inner = self.inner.lock().expect("cache lock poisoned");
+        if expected_generation.is_some_and(|generation| generation != inner.generation) {
+            return false;
+        }
         inner.tick += 1;
         let tick = inner.tick;
 
-        // Evict the least-recently-used entry if inserting a NEW key would
-        // exceed capacity. O(n) scan — fine at the configured scales.
-        if !inner.store.contains_key(&key) && inner.store.len() >= self.max_entries {
-            if let Some(lru_key) = inner
+        // A replacement first releases its old allocation. This also means
+        // an oversized replacement cannot leave a stale value cached.
+        if let Some(old) = inner.store.remove(&key) {
+            inner.bytes = inner.bytes.saturating_sub(old.bytes);
+        }
+        if bytes > self.max_bytes {
+            inner.rejected_oversized += 1;
+            return false;
+        }
+
+        while inner.store.len() >= self.max_entries
+            || inner.bytes.saturating_add(bytes) > self.max_bytes
+        {
+            let by_entries = inner.store.len() >= self.max_entries;
+            let Some(lru_key) = inner
                 .store
                 .iter()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| k.clone())
-            {
-                inner.store.remove(&lru_key);
-                inner.evictions_lru += 1;
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = inner.store.remove(&lru_key) {
+                inner.bytes = inner.bytes.saturating_sub(evicted.bytes);
+                if by_entries {
+                    inner.evictions_lru += 1;
+                } else {
+                    inner.evictions_bytes += 1;
+                }
             }
         }
 
@@ -225,10 +308,13 @@ impl Cache {
             key,
             Entry {
                 batches: Arc::new(batches),
+                bytes,
                 inserted_at: now,
                 last_used: tick,
             },
         );
+        inner.bytes = inner.bytes.saturating_add(bytes);
+        true
     }
 
     /// Removes every cached entry. Used when CDC signals that underlying
@@ -236,8 +322,15 @@ impl Cache {
     pub fn clear(&self) {
         let mut inner = self.inner.lock().expect("cache lock poisoned");
         let evicted = inner.store.len();
+        inner.generation = inner.generation.wrapping_add(1);
         inner.store.clear();
-        log::debug!("Cache cleared; {} entries evicted.", evicted);
+        inner.bytes = 0;
+        log::debug!("Cache cleared; {evicted} entries evicted.");
+    }
+
+    /// Returns the current invalidation generation for fencing query fills.
+    pub fn generation(&self) -> u64 {
+        self.inner.lock().expect("cache lock poisoned").generation
     }
 
     pub fn len(&self) -> usize {
@@ -255,14 +348,40 @@ impl Cache {
             misses: inner.misses,
             evictions_lru: inner.evictions_lru,
             evictions_ttl: inner.evictions_ttl,
+            evictions_bytes: inner.evictions_bytes,
+            rejected_oversized: inner.rejected_oversized,
             entries: inner.store.len(),
+            bytes: inner.bytes,
         }
     }
 }
 
+fn estimate_entry_bytes(key: &String, batches: &[RecordBatch]) -> usize {
+    // Arrow reports each array's buffer and logical memory estimate. Count
+    // each batch/array independently, which is conservative for shared
+    // buffers. Include key bytes and modest structural overhead per entry,
+    // batch and array; external Arc references and allocator overhead are
+    // outside this cache budget estimate.
+    let arrays = batches.iter().fold(0usize, |total, batch| {
+        batch.columns().iter().fold(total, |total, array| {
+            total.saturating_add(array.get_array_memory_size())
+        })
+    });
+    key.capacity()
+        .saturating_add(size_of::<Entry>())
+        .saturating_add(batches.len().saturating_mul(size_of::<RecordBatch>()))
+        .saturating_add(
+            batches
+                .iter()
+                .map(|batch| batch.num_columns().saturating_mul(size_of::<usize>()))
+                .fold(0usize, usize::saturating_add),
+        )
+        .saturating_add(arrays)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{normalize_query, Cache};
+    use super::{estimate_entry_bytes, normalize_query, Cache};
     use datafusion::arrow::array::Int64Array;
     use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datafusion::arrow::record_batch::RecordBatch;
@@ -276,6 +395,15 @@ mod tests {
             false,
         )]));
         RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![value]))]).unwrap()
+    }
+
+    fn batch_many(values: Vec<i64>) -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "v",
+            DataType::Int64,
+            false,
+        )]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))]).unwrap()
     }
 
     fn small_cache() -> Cache {
@@ -297,7 +425,7 @@ mod tests {
             ),
         ];
         for (a, b) in pairs {
-            assert_eq!(normalize_query(a), normalize_query(b), "{:?} vs {:?}", a, b);
+            assert_eq!(normalize_query(a), normalize_query(b), "{a:?} vs {b:?}");
         }
     }
 
@@ -314,7 +442,7 @@ mod tests {
             ("SELECT \"a b\" FROM t", "SELECT \"a  b\" FROM t"),
         ];
         for (a, b) in pairs {
-            assert_ne!(normalize_query(a), normalize_query(b), "{:?} vs {:?}", a, b);
+            assert_ne!(normalize_query(a), normalize_query(b), "{a:?} vs {b:?}");
         }
     }
 
@@ -386,6 +514,71 @@ mod tests {
         cache.clear();
         assert!(cache.is_empty());
         assert!(cache.get("a").is_none());
+    }
+
+    #[test]
+    fn byte_budget_evicts_lru_and_tracks_estimated_bytes() {
+        let first_bytes = estimate_entry_bytes(&normalize_query("SELECT 1"), &[batch(1)]);
+        let second_bytes = estimate_entry_bytes(&normalize_query("SELECT 2"), &[batch(2)]);
+        let max_bytes = first_bytes.max(second_bytes);
+        let cache = Cache::with_limits(8, max_bytes, Duration::from_secs(300));
+        cache.set("SELECT 1", vec![batch(1)]);
+        cache.set("SELECT 2", vec![batch(2)]);
+
+        assert!(cache.get("SELECT 1").is_none(), "oldest entry evicted");
+        assert!(cache.get("SELECT 2").is_some());
+        let stats = cache.stats();
+        assert_eq!(stats.evictions_bytes, 1);
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.bytes, second_bytes);
+    }
+
+    #[test]
+    fn oversized_replacement_removes_old_entry_and_is_counted() {
+        let old_bytes = estimate_entry_bytes(&normalize_query("SELECT 1"), &[batch(1)]);
+        let oversized = batch_many(vec![7; old_bytes]);
+        let cache = Cache::with_limits(8, old_bytes, Duration::from_secs(300));
+        cache.set("SELECT 1", vec![batch(1)]);
+        assert!(!cache.set_if_generation("SELECT 1", vec![oversized], cache.generation()));
+
+        assert!(cache.get("SELECT 1").is_none());
+        let stats = cache.stats();
+        assert_eq!(stats.rejected_oversized, 1);
+        assert_eq!(stats.bytes, 0);
+    }
+
+    #[test]
+    fn clear_fences_query_started_before_invalidation() {
+        let cache = Cache::with_limits(8, 4096, Duration::from_secs(300));
+        let query_generation = cache.generation();
+        cache.clear();
+
+        assert!(
+            !cache.set_if_generation("SELECT 1", vec![batch(1)], query_generation),
+            "in-flight fill rejected after clear"
+        );
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn stale_fill_cannot_overwrite_a_fresh_generation_entry() {
+        let cache = Cache::with_limits(8, 4096, Duration::from_secs(300));
+        let stale_generation = cache.generation();
+        cache.clear();
+        let fresh_generation = cache.generation();
+        assert!(cache.set_if_generation("SELECT 1", vec![batch(2)], fresh_generation));
+
+        assert!(!cache.set_if_generation("SELECT 1", vec![batch(1)], stale_generation));
+        let cached = cache.get("SELECT 1").unwrap();
+        assert_eq!(
+            cached[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            2
+        );
     }
 
     // --- LRU ---

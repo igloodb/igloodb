@@ -12,9 +12,10 @@
 #                                 IGLOO_SOURCE_ORDERS_DB_URI
 #   IGLOO_SOURCE_<NAME>_SCHEMAS   likewise for its schemas (comma-separated)
 #
-# Every value below is required (via the file or the environment) unless
-# marked optional. Igloo fails fast at startup if any is missing — there are
-# no built-in defaults for the required ones.
+# Configure at least one source family. parquet_path and cdc_path below are
+# optional legacy features (required only by the legacy one-shot demo).
+# No database connection defaults are assumed. See docs/CONNECTORS.md for
+# generic [[adbc_sources]] and inferred-schema [[parquet_sources]].
 
 # Directory of Parquet files registered as the `iceberg` table.
 parquet_path = "./dummy_iceberg_cdc/"
@@ -67,8 +68,11 @@ postgres_uri = "postgres://postgres:postgres@localhost:5432/mydb"
 # listen_addr = "127.0.0.1:5442"
 
 # Query-result cache tuning (optional; defaults shown). Env overrides:
-# IGLOO_CACHE_MAX_ENTRIES / IGLOO_CACHE_TTL_SECONDS. Must be positive.
+# IGLOO_CACHE_MAX_ENTRIES / IGLOO_CACHE_MAX_BYTES / IGLOO_CACHE_TTL_SECONDS.
+# Must be positive. Bytes estimate Arrow buffers and keys retained in cache;
+# references held by clients and other process memory are outside this budget.
 # cache_max_entries = 1024
+# cache_max_bytes = 67108864
 # cache_ttl_seconds = 300
 
 # How often `igloo serve` polls cdc_path for new CDC events that

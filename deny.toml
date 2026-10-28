@@ -33,6 +33,8 @@ allow = [
     "CC0-1.0",
     "Unicode-3.0",
     "OpenSSL",
+    # Mozilla CA trust-root data used by webpki-roots for native CDC TLS.
+    "CDLA-Permissive-2.0",
 ]
 
 # ring bundles code under MIT/ISC/OpenSSL; spell it out for cargo-deny.
