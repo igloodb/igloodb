@@ -9,12 +9,16 @@ pub const HELP: &str = "Igloo — experimental SQL federation for developers and
 
 Usage:
   igloo mcp [--demo]                          Native MCP server over stdio
+  igloo mcp-http [--demo] [--listen IP:PORT]  Authenticated Streamable HTTP MCP
+      [--behind-tls-proxy] [--allowed-host HOST]...
   igloo query [--demo] --sql 'SELECT ...'      One bounded, read-only JSON result
   igloo explain [--demo] --sql 'SELECT ...'    Logical plan; no query execution
   igloo query|explain|schema [--demo] --json   Read a JSON request from stdin
   igloo schema [--demo]                       Discover tables and typed columns
   igloo capabilities                         JSON limits and contract information
   igloo connectors                           Connector routes and verified coverage
+  igloo cdc-check [--source NAME] --publication NAME [--timeout-ms N]
+                                            PostgreSQL logical replication probe
   igloo serve                                PostgreSQL wire server (configured)
   igloo crypto-demo                          Deterministic market analytics demo
 
@@ -27,6 +31,9 @@ variables. Native PostgreSQL and --demo need no ADBC driver; adbc_sources do.
 No model API key is required. Agent queries bypass cache.
 JSON commands exit 0 on success or 2 with an error object; diagnostics use stderr.
 See docs/AGENTS.md for setup, exact encodings, limits, and MCP client examples.
+HTTP MCP binds to loopback by default and requires IGLOO_MCP_HTTP_TOKEN or
+IGLOO_MCP_HTTP_TOKEN_FILE. Igloo serves plaintext HTTP; non-loopback binding
+requires --behind-tls-proxy and an explicit --allowed-host for the TLS proxy.
 ";
 
 fn invalid(message: &str) -> AgentError {
@@ -38,6 +45,9 @@ fn invalid(message: &str) -> AgentError {
 }
 
 pub async fn run(command: &str, args: Vec<String>) -> Result<(), AgentError> {
+    if command == "mcp-http" {
+        return run_http(args).await;
+    }
     let mut demo = false;
     let mut json_input = false;
     let mut sql = None;
@@ -128,4 +138,141 @@ pub async fn run(command: &str, args: Vec<String>) -> Result<(), AgentError> {
     };
     println!("{value}");
     Ok(())
+}
+
+const DEFAULT_HTTP_LISTEN: &str = "127.0.0.1:8000";
+
+#[derive(Debug, PartialEq, Eq)]
+struct HttpArgs {
+    demo: bool,
+    listen: std::net::SocketAddr,
+    behind_tls_proxy: bool,
+    allowed_hosts: Vec<String>,
+}
+
+fn parse_http_args(args: Vec<String>) -> Result<HttpArgs, AgentError> {
+    let mut demo = false;
+    let mut listen = None;
+    let mut behind_tls_proxy = false;
+    let mut allowed_hosts = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--demo" if !demo => demo = true,
+            "--listen" if listen.is_none() => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| invalid("--listen requires an IP:PORT value."))?;
+                listen = Some(value.parse().map_err(|_| {
+                    invalid(
+                        "--listen must be a numeric IP address and port, such as 127.0.0.1:8000.",
+                    )
+                })?);
+            }
+            "--behind-tls-proxy" if !behind_tls_proxy => behind_tls_proxy = true,
+            "--allowed-host" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| invalid("--allowed-host requires a host or host:port value."))?;
+                if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
+                    return Err(invalid(
+                        "--allowed-host must be a non-empty host or host:port value.",
+                    ));
+                }
+                if !allowed_hosts.contains(&value) {
+                    allowed_hosts.push(value);
+                }
+            }
+            _ => return Err(invalid("Unknown or duplicate mcp-http argument.")),
+        }
+    }
+    let listen =
+        listen.unwrap_or_else(|| DEFAULT_HTTP_LISTEN.parse().expect("static socket address"));
+    crate::mcp::validate_http_bind(listen, behind_tls_proxy)?;
+    if !listen.ip().is_loopback() && allowed_hosts.is_empty() {
+        return Err(AgentError::new(
+            "invalid_configuration",
+            "A non-loopback listener requires an explicit allowed host.",
+            "Add --allowed-host with the host name used by the TLS reverse proxy.",
+        ));
+    }
+    Ok(HttpArgs {
+        demo,
+        listen,
+        behind_tls_proxy,
+        allowed_hosts,
+    })
+}
+
+pub async fn run_http(args: Vec<String>) -> Result<(), AgentError> {
+    let args = parse_http_args(args)?;
+    // Resolve credentials before opening any configured source connections.
+    let auth = crate::mcp::HttpAuth::from_environment()?;
+    let session = if args.demo {
+        AgentSession::demo()?
+    } else {
+        AgentSession::configured().await?
+    };
+    crate::mcp::serve_http(
+        session,
+        args.listen,
+        auth,
+        args.behind_tls_proxy,
+        args.allowed_hosts,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod http_cli_tests {
+    use super::{parse_http_args, DEFAULT_HTTP_LISTEN};
+    use std::net::SocketAddr;
+
+    #[test]
+    fn http_cli_defaults_to_loopback_and_rejects_non_loopback_without_proxy() {
+        let args = parse_http_args(Vec::new()).unwrap();
+        assert_eq!(
+            args.listen,
+            DEFAULT_HTTP_LISTEN.parse::<SocketAddr>().unwrap()
+        );
+        assert!(!args.behind_tls_proxy);
+        assert!(parse_http_args(vec!["--listen".into(), "0.0.0.0:8000".into()]).is_err());
+    }
+
+    #[test]
+    fn remote_listener_requires_explicit_proxy_and_allowed_host() {
+        assert!(parse_http_args(vec![
+            "--listen".into(),
+            "0.0.0.0:8000".into(),
+            "--behind-tls-proxy".into(),
+        ])
+        .is_err());
+        let args = parse_http_args(vec![
+            "--listen".into(),
+            "10.0.0.5:8000".into(),
+            "--behind-tls-proxy".into(),
+            "--allowed-host".into(),
+            "mcp.internal:8000".into(),
+        ])
+        .unwrap();
+        assert_eq!(args.allowed_hosts, ["mcp.internal:8000"]);
+    }
+
+    #[test]
+    fn conflicting_http_flags_are_rejected() {
+        assert!(parse_http_args(vec!["--demo".into(), "--demo".into()]).is_err());
+        assert!(parse_http_args(vec![
+            "--listen".into(),
+            "127.0.0.1:8000".into(),
+            "--listen".into(),
+            "127.0.0.1:8001".into(),
+        ])
+        .is_err());
+        assert!(parse_http_args(vec![
+            "--listen".into(),
+            "127.0.0.1:8000".into(),
+            "--behind-tls-proxy".into(),
+        ])
+        .is_ok());
+    }
 }

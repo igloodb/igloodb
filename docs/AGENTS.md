@@ -218,6 +218,53 @@ tenant isolation, a sandbox for untrusted custom functions/providers, or a
 substitute for database privileges. Treat retrieved rows and identifiers as
 untrusted data, never agent instructions.
 
+## Shared HTTP MCP (unreleased)
+
+`igloo mcp-http` exposes the same five tools and read-only `AgentSession` over
+Streamable HTTP at `/mcp`. Every client in a deployment shares one configured
+source scope. It does not provide separate user permissions or tenant isolation.
+The agent query contract and cache bypass are unchanged.
+
+Supply exactly one of `IGLOO_MCP_HTTP_TOKEN` or `IGLOO_MCP_HTTP_TOKEN_FILE`.
+Tokens must contain 32–256 printable non-space ASCII bytes. Secret files may end
+with a newline and are re-read for each request. Atomically replace or remove the
+file to reject the old token on subsequent requests. Already authenticated
+requests/streams are not forcibly terminated. Environment tokens last for the process lifetime.
+Keep tokens in client-supported secret settings, never prompts or committed files.
+
+```sh
+# Set IGLOO_MCP_HTTP_TOKEN_FILE to an absolute operator-owned secret file.
+igloo mcp-http --demo --listen 127.0.0.1:8000
+```
+
+Connect a compatible Streamable HTTP client to `http://127.0.0.1:8000/mcp` with
+an `Authorization: Bearer ...` header. The demo uses no database credentials.
+Remove `--demo` for configured native PostgreSQL, ADBC and Parquet sources.
+
+Igloo itself serves plaintext HTTP. For shared access, put it behind a TLS
+reverse proxy and restrict the backend listener to that proxy. A non-loopback
+bind requires explicit `--behind-tls-proxy` and one or more `--allowed-host`
+values matching the forwarded Host header. The flag acknowledges operator setup;
+it does not enable or verify TLS. The proxy must preserve the bearer header and
+support MCP streaming. Browser Origin headers are rejected by default.
+When proxying to a loopback listener, also set `--allowed-host` if the proxy
+forwards an external hostname instead of a loopback Host value.
+
+```sh
+igloo mcp-http --listen 10.0.0.5:8000 --behind-tls-proxy \
+  --allowed-host mcp.internal.example
+```
+
+The HTTP layer caps request bodies at 128 KiB and active HTTP response streams
+at 32. HTTP is stateless across protocol versions and does not allocate retained
+per-client MCP sessions. The shared agent query slot serializes execution, with the
+existing timeout including slot wait. These bounds are not a source scan or
+memory sandbox. Query results retain the 1 MiB data-envelope budget. The pgwire
+endpoint remains separately unauthenticated and must not be exposed by the proxy.
+
+The native CDC diagnostic is an operator command, documented in [CDC setup](CDC.md).
+It is not exposed as an agent tool and does not change agent query freshness.
+
 ## Development and evaluation
 
 ```sh

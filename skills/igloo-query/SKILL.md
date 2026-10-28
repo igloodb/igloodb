@@ -29,4 +29,6 @@ Do not attempt writes or exports. Source roles must separately restrict database
 permissions. Result limits do not cap upstream scans or memory; local timeouts
 do not guarantee upstream cancellation. Do not represent this experimental engine
 as production ready or claim unsupported connectors, Iceberg tables, vector
-search, durable memory, tenant isolation or authenticated remote MCP.
+search, durable memory, tenant isolation or CDC-consistent query caching.
+Authenticated HTTP MCP is an unreleased trusted-team interface; consult the
+agent guide for credentials and required reverse-proxy TLS setup.

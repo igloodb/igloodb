@@ -115,7 +115,11 @@ impl SimpleQueryHandler for IglooQueryHandler {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        log::debug!("pgwire query: {}", query);
+        log::debug!("pgwire query: {query}");
+
+        // A change event during execution must prevent a late cache fill
+        // from restoring the invalidated result.
+        let generation = self.cache.generation();
 
         if is_cacheable(query) {
             if let Some(batches) = self.cache.get(query) {
@@ -133,7 +137,7 @@ impl SimpleQueryHandler for IglooQueryHandler {
             .map_err(|e| user_error(e.to_string()))?;
         let response = batches_to_response(&batches)?;
         if is_cacheable(query) {
-            self.cache.set(query, batches);
+            self.cache.set_if_generation(query, batches, generation);
         }
         Ok(vec![response])
     }
@@ -222,6 +226,7 @@ impl ExtendedQueryHandler for IglooQueryHandler {
         log::debug!("pgwire extended query (portal {:?}): {}", portal.name, sql);
 
         let cacheable = portal.parameter_len() == 0 && is_cacheable(sql);
+        let generation = self.cache.generation();
         if cacheable {
             if let Some(batches) = self.cache.get(sql) {
                 log::debug!("pgwire cache hit");
@@ -251,7 +256,8 @@ impl ExtendedQueryHandler for IglooQueryHandler {
             .map_err(|e| user_error(e.to_string()))?;
 
         if cacheable {
-            self.cache.set(sql, batches.clone());
+            self.cache
+                .set_if_generation(sql, batches.clone(), generation);
         }
         batches_to_response_in_format(&batches, &portal.result_column_format)
     }

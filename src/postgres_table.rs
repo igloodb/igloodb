@@ -279,7 +279,7 @@ impl TableProvider for PostgresTable {
         // Log the generated SQL (structure only) at debug level. Predicate
         // *values* live in the SQL string, so this stays at debug and never
         // info, to avoid logging data at normal verbosity.
-        log::debug!("Executing scan query on Postgres: {}", query);
+        log::debug!("Executing scan query on Postgres: {query}");
 
         // A projection can be empty (e.g. `SELECT COUNT(*)`), in which case
         // DataFusion only needs the row count, not any column data.

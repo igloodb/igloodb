@@ -52,13 +52,32 @@ compatible drivers are candidates awaiting database-specific validation. Run
 The goal is broad support across databases, warehouses and lakehouses, with
 replication/CDC and JDBC/ODBC or native bridges as separate integration paths.
 
-**Current limitations:** No real Iceberg integration, vector search, persistent agent memory, or
-authenticated remote MCP. The separate pgwire endpoint is unauthenticated
+**Current limitations:** No real Iceberg integration, vector search, persistent agent memory,
+or per-user source authorization. Experimental HTTP MCP uses a shared team token
+and requires operator-provided TLS for remote access. The separate pgwire endpoint is unauthenticated
 plaintext. Query response limits do not bound upstream scans/memory or guarantee
 upstream cancellation; independent sources do not share a consistent snapshot.
 
 
 ## 🏗️ How Igloo Works
+
+### Unreleased implementation work
+
+This source preview adds authenticated Streamable HTTP MCP for a trusted
+team (`igloo mcp-http`), a native PostgreSQL logical-replication probe
+(`igloo cdc-check`), and byte-bounded result caching with invalidation-safe fills.
+These changes are experimental and are not a tagged release. Agent queries still
+bypass the result cache. Native CDC is a tested building block and operator
+diagnostic; it is not yet connected to query-cache validation or incremental
+materializations. See the [agent guide](docs/AGENTS.md),
+[CDC guide](docs/CDC.md), and [delivery plan](docs/PROJECT_PLAN.md).
+The [implementation status](docs/IMPLEMENTATION_STATUS.md) records exact checks
+and remaining release blockers.
+
+The dependency advisory gate remains blocked by the existing DataFusion/Parquet
+compression dependency constraints. Compatible Tokio and Rustls fixes are applied;
+the remaining zstd advisories are not suppressed. Do not treat this tree as a
+production release.
 
 - **Data Querying:** Native PostgreSQL uses a custom `tokio-postgres` provider with conservative filter pushdown. Generic ADBC sources discover tables through standard metadata and stream Arrow batches into DataFusion through a separate provider. The legacy `adbc_postgres.rs` smoke example remains a standalone demonstration.
 - **Materialized Views & Auto-Cache:** Today the "iceberg" table is a plain directory of Parquet files (no Iceberg manifests, snapshots, or materialized views), and cache-invalidating change events are a directory of JSON files. Real Apache Iceberg integration is planned — see Roadmap.

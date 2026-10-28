@@ -1,5 +1,67 @@
 # Igloo: market analysis and agent product strategy
 
+## Strategy update: 28 October 2026
+
+The agreed [project plan](PROJECT_PLAN.md) now targets open source adoption with
+one full-time maintainer, a six-month experimental release and an 18–24 month
+production program. CDC-backed invalidation and incremental maintenance are
+central. Local and authenticated shared use serve one trusted team initially.
+Strict freshness is per PostgreSQL source, without a shared cross-database
+snapshot. The older priorities below describe the previous preview iteration.
+
+### Updated demand evidence
+
+Stack Overflow's **2026** trust question has 14,304 responses: 48% trust AI when
+they can easily verify its output; 6.6% trust it for important work decisions.
+This supports inspectable SQL, plans and source evidence, not a claim of demand
+for Igloo. The survey is self-selected and does not measure database purchasing
+intent. [Primary survey data](https://survey.stackoverflow.co/2026/ai/data/ai-trust).
+
+Anthropic/Material surveyed over 500 US technical leaders in late 2025. Their
+2026 report identifies integration and data quality as adoption challenges.
+Vendor sponsorship, the respondent population and self-reporting limit general
+market conclusions. [Methodology and findings](https://claude.com/resources/guides/the-2026-state-of-ai-agents-report/foreword).
+
+### Additional direct competitors
+
+| Alternative | Documented capability | Consequence |
+| --- | --- | --- |
+| ReadySet | CDC-fed SQL caching/incremental dataflow; local stdio and remote authenticated MCP | Caching plus MCP is already established. Its documented deep-cache consistency is eventual; compare contracts in tests. |
+| PgCache | PostgreSQL proxy with CDC-driven in-place updates/invalidation and materialized results | Closely overlaps the hybrid cache approach; verify consistency against the exact current documentation and workload. |
+| Materialize | Incrementally maintained data products and built-in agent MCP with roles | Strong alternative for maintained-view workloads; agent access/fresh data is not a unique market position. |
+| RisingWave | Streaming SQL, CDC and agent tooling | Offers a mature alternative when streaming computation is the main job. |
+| Feldera | Incremental SQL engine with an MIT-licensed single-node edition | Permissive licensing and incremental SQL alone do not establish differentiation. |
+| DBHub | Multiple database families exposed through MCP | Direct agent access may be enough for simple workflows. |
+| Snowflake/Databricks | Managed agent access within existing governance/data platforms | Existing platform users have a strong incumbent option. |
+
+Primary sources checked for this update:
+
+- [ReadySet caching](https://readyset.io/docs/concepts/deep-caching) and [MCP](https://readyset.io/docs/readyset-ai/mcp-server).
+- [PgCache architecture and consistency](https://www.pgcache.com/docs/how-caching-works/).
+- [Materialize agent MCP](https://materialize.com/docs/developer-tools/mcp-server/mcp-agent/).
+- [RisingWave source](https://github.com/risingwavelabs/risingwave).
+- [Feldera editions](https://www.feldera.com/pricing).
+- [DBHub source](https://github.com/bytebase/dbhub).
+- [Snowflake MCP](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents-mcp) and [Databricks SQL MCP](https://docs.databricks.com/aws/en/agents/mcp-tools/databricks-sql).
+
+Vendor capabilities are not independent performance evidence. Igloo's strongest
+current hypothesis is an easier, inspectable workflow combining existing-source
+federation and explicit freshness, with predictable fallback. No unique moat,
+comparative speedup, market share or revenue TAM has been established.
+
+Assuming agents become ubiquitous increases potential automated reads, but the
+initial reachable audience is narrower: heterogeneous data, repeated expensive
+reads, replication permission and a preference for self-hosting. Evaluate avoided
+computation against replication, primary round trips/WAL barriers, maintenance,
+memory and operating cost. Users with one database or one-off questions may be
+better served by direct SQL, existing MCP tooling or DuckDB.
+
+The source preview adds authenticated HTTP MCP, byte-bounded/fenced cache admission
+and a native CDC probe. It does not yet provide strict query-cache integration
+or incremental maintenance. Those are delivery milestones, not current claims.
+
+## Previous preview research
+
 Research date: **27 October 2026**. Primary product documentation and the local
 engine source were reviewed. Vendor capabilities are vendor statements, not
 independently benchmarked results. Recommendations and commercial hypotheses are

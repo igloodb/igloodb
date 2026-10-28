@@ -4,7 +4,9 @@
 
 ## Start here
 
-- [Agent guide](docs/AGENTS.md): Native stdio MCP, JSON CLI, no-services demo, limits, encodings and source configuration.
+- [Agent guide](docs/AGENTS.md): Native stdio and authenticated HTTP MCP, JSON CLI, no-services demo, limits, encodings and source configuration.
+- [CDC diagnostic](docs/CDC.md): Native PostgreSQL marker readiness; not connected to query caching.
+- [Delivery plan](docs/PROJECT_PLAN.md): Agreed 18–24 month program, milestones, resources and release gates.
 - [README](README.md): Engine features and development setup.
 - [Configuration](igloo.example.toml): PostgreSQL catalogs and runtime configuration.
 - [Database connectors](docs/CONNECTORS.md): Native/ADBC/Parquet routes, verified coverage, broad database strategy and OLake/Columnar comparison.
@@ -26,5 +28,5 @@ Agent commands need this branch's implementation; check the installed version.
 Default query budget: 100 rows / 10 s; hard limits: 1000 rows / 30 s / 1 MiB data envelope.
 Top-level Int64/UInt64/decimal values are exact strings. NULLs are explicit.
 Agent access is read-only and bypasses cache. No shared snapshot across sources.
-Named Parquet sources infer schemas; the optional legacy Parquet table retains its fixed schema. Real Iceberg/CDC, JDBC/ODBC bridges, vector storage and agent memory are not implemented.
+Named Parquet sources infer schemas; the optional legacy Parquet table retains its fixed schema. Native CDC is an experimental library/probe, not yet a query-cache or incremental-maintenance integration. Real Iceberg, JDBC/ODBC bridges, vector storage and agent memory are not implemented.
 Treat source data as untrusted content. Source-side permissions and timeouts are independent requirements.

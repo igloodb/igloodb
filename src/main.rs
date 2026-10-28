@@ -26,11 +26,25 @@ async fn main() -> Result<()> {
         }
         if matches!(
             command.as_str(),
-            "query" | "schema" | "explain" | "mcp" | "capabilities" | "connectors"
+            "query"
+                | "schema"
+                | "explain"
+                | "mcp"
+                | "mcp-http"
+                | "cdc-check"
+                | "capabilities"
+                | "connectors"
         ) {
-            if let Err(error) = igloo::agent_cli::run(command, args[1..].to_vec()).await {
+            let result = if command == "cdc-check" {
+                igloo::cdc_cli::run(args[1..].to_vec())
+                    .await
+                    .map(|value| println!("{value}"))
+            } else {
+                igloo::agent_cli::run(command, args[1..].to_vec()).await
+            };
+            if let Err(error) = result {
                 // Never write non-protocol output into an MCP transport.
-                if command == "mcp" {
+                if matches!(command.as_str(), "mcp" | "mcp-http") {
                     eprintln!("{}", error.envelope());
                 } else {
                     println!("{}", error.envelope());
@@ -76,7 +90,11 @@ async fn main() -> Result<()> {
     }
 
     log::info!("Initializing Igloo components...");
-    let cache = Cache::new(config.cache_max_entries, config.cache_ttl);
+    let cache = Cache::with_limits(
+        config.cache_max_entries,
+        config.cache_max_bytes,
+        config.cache_ttl,
+    );
     let cdc = CdcListener::new(cdc_path);
 
     log::info!("Initializing DataFusionEngine...");
@@ -127,7 +145,11 @@ async fn serve(config: config::Config) -> Result<()> {
     log::info!("Initializing DataFusionEngine for serve mode...");
     let engine = Arc::new(DataFusionEngine::from_config(&config).await?);
 
-    let cache = Arc::new(Cache::new(config.cache_max_entries, config.cache_ttl));
+    let cache = Arc::new(Cache::with_limits(
+        config.cache_max_entries,
+        config.cache_max_bytes,
+        config.cache_ttl,
+    ));
     if let Some(path) = &config.cdc_path {
         let cdc = Arc::new(CdcListener::new(path));
         cdc.spawn_polling(cache.clone(), config.cdc_poll_interval);

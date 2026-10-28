@@ -138,6 +138,19 @@ jobs:
         PY
     # Seeds crypto_assets for the crypto-metrics federated integration test;
     # every other live-database test creates its own uniquely-named tables.
+    - name: Enable native logical replication in the disposable test service
+      env:
+        PGPASSWORD: postgres
+      run: |
+        psql -h localhost -U postgres -d igloo_test -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET wal_level = 'logical'"
+        docker restart "${{ job.services.postgres.id }}"
+        for attempt in $(seq 1 30); do
+          if pg_isready -h localhost -U postgres -d igloo_test; then
+            exit 0
+          fi
+          sleep 1
+        done
+        exit 1
     - name: Seed integration database
       run: psql 'postgres://postgres:postgres@localhost:5432/igloo_test' -f scripts/seed_test_db.sql
     - name: Run integration tests
@@ -150,5 +163,7 @@ jobs:
         cargo test --test pgwire_server --locked -- --nocapture --test-threads=2
         cargo test --test agent_access --locked -- --nocapture --test-threads=2
         cargo test --test connectors --locked -- --nocapture --test-threads=2
+        cargo test --test postgres_cdc --locked -- --nocapture --test-threads=2
+        cargo test --test cache_invalidation_race --locked -- --nocapture
       env:
         IGLOO_TEST_POSTGRES_URI: postgres://postgres:postgres@localhost:5432/igloo_test

@@ -68,8 +68,11 @@ postgres_uri = "postgres://postgres:postgres@localhost:5432/mydb"
 # listen_addr = "127.0.0.1:5442"
 
 # Query-result cache tuning (optional; defaults shown). Env overrides:
-# IGLOO_CACHE_MAX_ENTRIES / IGLOO_CACHE_TTL_SECONDS. Must be positive.
+# IGLOO_CACHE_MAX_ENTRIES / IGLOO_CACHE_MAX_BYTES / IGLOO_CACHE_TTL_SECONDS.
+# Must be positive. Bytes estimate Arrow buffers and keys retained in cache;
+# references held by clients and other process memory are outside this budget.
 # cache_max_entries = 1024
+# cache_max_bytes = 67108864
 # cache_ttl_seconds = 300
 
 # How often `igloo serve` polls cdc_path for new CDC events that

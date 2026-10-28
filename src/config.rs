@@ -62,6 +62,7 @@ struct FileConfig {
     parquet_sources: Vec<ParquetSource>,
     listen_addr: Option<String>,
     cache_max_entries: Option<u64>,
+    cache_max_bytes: Option<u64>,
     cache_ttl_seconds: Option<u64>,
     cdc_poll_seconds: Option<u64>,
 }
@@ -154,6 +155,8 @@ pub struct Config {
     pub listen_addr: Option<String>,
     /// Maximum cached query results before LRU eviction (default 1024).
     pub cache_max_entries: usize,
+    /// Estimated Arrow batches and key bytes retained by the result cache.
+    pub cache_max_bytes: usize,
     /// How long a cached result stays valid (default 300s).
     pub cache_ttl: std::time::Duration,
     /// How often serve mode polls the CDC location for new events
@@ -215,6 +218,7 @@ impl Config {
             parquet_sources,
             listen_addr: file_listen_addr,
             cache_max_entries: file_cache_max_entries,
+            cache_max_bytes: file_cache_max_bytes,
             cache_ttl_seconds: file_cache_ttl_seconds,
             cdc_poll_seconds: file_cdc_poll_seconds,
         } = file;
@@ -243,6 +247,9 @@ impl Config {
         let cache_ttl_seconds = env_u64(&env, "IGLOO_CACHE_TTL_SECONDS")?
             .or(file_cache_ttl_seconds)
             .unwrap_or(DEFAULT_CACHE_TTL_SECONDS);
+        let cache_max_bytes = env_u64(&env, "IGLOO_CACHE_MAX_BYTES")?
+            .or(file_cache_max_bytes)
+            .unwrap_or(crate::cache_layer::DEFAULT_CACHE_MAX_BYTES as u64);
         let cdc_poll_seconds = env_u64(&env, "IGLOO_CDC_POLL_SECONDS")?
             .or(file_cdc_poll_seconds)
             .unwrap_or(DEFAULT_CDC_POLL_SECONDS);
@@ -254,7 +261,12 @@ impl Config {
             adbc_sources,
             parquet_sources,
             listen_addr,
-            cache_max_entries: cache_max_entries as usize,
+            cache_max_entries: usize::try_from(cache_max_entries).map_err(|_| {
+                IglooError::Config("cache_max_entries exceeds this platform's capacity".into())
+            })?,
+            cache_max_bytes: usize::try_from(cache_max_bytes).map_err(|_| {
+                IglooError::Config("cache_max_bytes exceeds this platform's capacity".into())
+            })?,
             cache_ttl: std::time::Duration::from_secs(cache_ttl_seconds),
             cdc_poll_interval: std::time::Duration::from_secs(cdc_poll_seconds),
         };
@@ -317,6 +329,11 @@ impl Config {
         if self.cache_ttl.is_zero() {
             return Err(IglooError::Config(
                 "cache_ttl_seconds must be positive".into(),
+            ));
+        }
+        if self.cache_max_bytes == 0 {
+            return Err(IglooError::Config(
+                "cache_max_bytes must be positive".into(),
             ));
         }
         if self.cdc_poll_interval.is_zero() {
@@ -593,6 +610,7 @@ mod tests {
             parquet_sources: Vec::new(),
             listen_addr: None,
             cache_max_entries: None,
+            cache_max_bytes: None,
             cache_ttl_seconds: None,
             cdc_poll_seconds: None,
         }
@@ -697,24 +715,52 @@ mod tests {
     fn cache_settings_default_and_override() {
         let defaults = Config::from_sources(full_file(), no_env).unwrap();
         assert_eq!(defaults.cache_max_entries, 1024);
+        assert_eq!(
+            defaults.cache_max_bytes,
+            crate::cache_layer::DEFAULT_CACHE_MAX_BYTES
+        );
         assert_eq!(defaults.cache_ttl.as_secs(), 300);
         assert_eq!(defaults.cdc_poll_interval.as_secs(), 10);
 
         let file = FileConfig {
             cache_max_entries: Some(8),
+            cache_max_bytes: Some(4096),
             cache_ttl_seconds: Some(30),
             ..full_file()
         };
-        let overridden = Config::from_sources(file, |key| {
-            (key == "IGLOO_CACHE_MAX_ENTRIES").then(|| "16".to_string())
+        let overridden = Config::from_sources(file, |key| match key {
+            "IGLOO_CACHE_MAX_ENTRIES" => Some("16".to_string()),
+            "IGLOO_CACHE_MAX_BYTES" => Some("8192".to_string()),
+            _ => None,
         })
         .unwrap();
         assert_eq!(overridden.cache_max_entries, 16, "env beats file");
+        assert_eq!(
+            overridden.cache_max_bytes, 8192,
+            "byte-budget env beats file"
+        );
         assert_eq!(overridden.cache_ttl.as_secs(), 30, "file beats default");
     }
 
     #[test]
     fn invalid_cache_settings_are_rejected() {
+        let err = Config::from_sources(
+            FileConfig {
+                cache_max_bytes: Some(0),
+                ..full_file()
+            },
+            no_env,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cache_max_bytes"), "got: {err}");
+
+        let err = Config::from_sources(full_file(), |key| {
+            (key == "IGLOO_CACHE_MAX_BYTES").then(|| "unlimited".to_string())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("IGLOO_CACHE_MAX_BYTES"), "got: {err}");
         let zero_capacity = FileConfig {
             cache_max_entries: Some(0),
             ..full_file()

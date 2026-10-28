@@ -285,11 +285,37 @@ README roadmap (`README.md:209-213`):
 
 Separately, the README "Features" section now matches the code: "Fast SQL Execution with DataFusion" (done — `src/datafusion_engine.rs:63-72`), "Join Support for Postgres + Arrow datasets" (done in-memory, with conservative filter pushdown; schemas still hardcoded — see item 3), caching keyed by canonicalized SQL (done — `src/cache_layer.rs:31`), and CDC-driven invalidation from JSON event files (done, with Iceberg explicitly marked as planned).
 
+## Current implementation boundary (28 October 2026)
+
+The historical audit above describes earlier revisions; its old line numbers,
+single-request claims and roadmap table are not a current capability inventory.
+The following additions and [roadmap](../ROADMAP.md) describe this source preview.
+
+The cache now tracks estimated key and Arrow array bytes, evicts to respect
+entry and byte budgets, and rejects oversized replacements. `clear()` increments
+an invalidation generation under the same lock. Pgwire reads capture that
+generation before execution and call `set_if_generation` afterward; a file
+change during execution can no longer restore the invalidated result.
+This is admission safety, not detection of live database changes.
+
+`postgres_cdc` owns a direct native `pgoutput` stream, volatile source health,
+generation UUIDs, source-wide committed-change epochs and transactional marker
+waiters. Marker-only transactions do not advance the data epoch. A barrier only
+resolves on the marker's containing Commit. The operator `cdc-check` command
+verifies this path with a temporary slot; query execution does not yet use it.
+
+Future strict-cache integration must supply complete dependencies, validate
+publication/schema/permissions/source identity, pin native source snapshots
+after initial barriers and validate again before admitting fills. Existing
+provider scans use separate source statements, so they are not query-wide
+repeatable-read snapshots. There is no global cross-source snapshot.
+
 ## Agent access
 
 The agent entry points use the existing DataFusion engine through a dedicated
 `AgentSession` in `src/agent.rs`. `src/mcp.rs` exposes it with the official Rust
-MCP SDK over stdio; `src/agent_cli.rs` exposes the same contracts as JSON commands.
+MCP SDK over stdio and authenticated Streamable HTTP; `src/agent_cli.rs` exposes
+the same contracts as JSON commands.
 Both enforce a single query and full-plan read-only checks before execution,
 bound result rows/time/bytes, and bypass the existing cache. The no-services demo
 registers an in-memory fixture. The legacy pgwire and demonstration paths retain
