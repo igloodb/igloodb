@@ -1,11 +1,32 @@
-# 🍙 Igloo
+# Igloo
 
-Igloo is an experimental, single-node SQL query engine with an intelligent caching layer, built in Rust. It connects to external databases via ADBC drivers, leveraging DataFusion for query execution and Apache Arrow for in-memory data representation. Igloo caches query results and keeps them up to date using Change Data Capture (CDC) stored in the Iceberg format.
+Experimental single-node SQL federation in Rust, built with Apache DataFusion and Apache Arrow. Query PostgreSQL databases alongside Parquet, connect through the PostgreSQL wire protocol, and reuse results in an in-memory LRU/TTL cache. File-based JSON change events invalidate the cache.
 
+[Website & documentation](https://igloodb.github.io/) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](ROADMAP.md)
+
+## Start here
+
+The self-contained market analytics demo uses deterministic synthetic OHLCV data and requires no PostgreSQL setup:
+
+```sh
+cargo run --locked -- crypto-demo
+```
+
+For a technical review, start with [filter translation](src/pushdown.rs), [differential pushdown tests](tests/pushdown.rs), the [Arrow-native cache](src/cache_layer.rs), and the [market-metrics implementation](src/crypto_metrics.rs).
+
+### Implementation status
+
+| Scope | Status |
+| --- | --- |
+| Default branch | Single-node PostgreSQL/Parquet federation, conservative filter pushdown, pgwire simple/prepared queries, and in-memory result caching. |
+| Default-branch change handling | JSON event files invalidate the cache. The Parquet-backed table named `iceberg` is not an Apache Iceberg table. |
+| ADBC on the default branch | Standalone experimental FFI example, separate from the DataFusion query path. |
+| [Draft preview #32](https://github.com/igloodb/igloodb/pull/32) | Agent interfaces, broader ADBC integration, native CDC foundations, and cache-safety work. See the PR for validation and release blockers; this work is not merged into the default branch. |
+| Roadmap | Distributed execution, Apache Iceberg integration, and stronger source-aware freshness. |
 
 ## 🏗️ How Igloo Works
 
-- **Data Querying:** Apache DataFusion queries PostgreSQL through a custom `TableProvider` built on `tokio-postgres`, with conservative filter pushdown (exactly-equivalent predicates only) translated into the generated SQL. A separate, experimental ADBC FFI path also exists as a standalone example — it is not wired into DataFusion.
+- **Data Querying:** Apache DataFusion queries PostgreSQL through a custom `TableProvider` built on `tokio-postgres`, with conservative filter pushdown with local predicate rechecks translated into the generated SQL. A separate, experimental ADBC FFI path also exists as a standalone example — it is not wired into DataFusion.
 - **Materialized Views & Auto-Cache:** Today the "iceberg" table is a plain directory of Parquet files (no Iceberg manifests, snapshots, or materialized views), and cache-invalidating change events are a directory of JSON files. Real Apache Iceberg integration is planned — see Roadmap.
 - **Smart Caching:** Query results are cached in memory (with pluggable backends planned), and cache invalidation/refresh is driven by Change Data Capture (CDC) events read from JSON files (real Iceberg-based CDC is planned — see Roadmap).
 
@@ -13,27 +34,15 @@ Igloo is an experimental, single-node SQL query engine with an intelligent cachi
 
 ```mermaid
 flowchart LR
-    subgraph DataSources["Relational DB Sources"]
-        PG["Postgres"]
-        MY["MySQL"]
-        MSSQL["SQL Server"]
-        JDBC["Generic JDBC"]
-    end
-    PG --> IGLOO
-    MY --> IGLOO
-    MSSQL --> IGLOO
-    JDBC --> IGLOO
-    subgraph IGLOO["Igloo"]
-        CACHE["Smart Cache"]
-        ENGINE["Query Engine (DataFusion)"]
-        CDC["CDC Listener"]
-    end
-    IGLOO --> CACHE
-    IGLOO --> ENGINE
-    IGLOO --> CDC
-    CACHE -- "Fresh/Hot Data" --> ANALYTICS["Real-time Analytics"]
-    ENGINE -- "Query Results" --> ANALYTICS
-    CDC -- "Change Events" --> CACHE
+    PG["PostgreSQL sources"] --> PROVIDER["Custom TableProvider + conservative pushdown"]
+    PARQUET["Parquet files"] --> ENGINE["DataFusion: plan and execute"]
+    PROVIDER --> ENGINE
+    CLIENT["SQL client / PostgreSQL wire"] --> SERVER["Igloo server"]
+    SERVER --> ENGINE
+    SERVER <--> CACHE["In-memory Arrow LRU + TTL cache"]
+    ENGINE --> RESULT["Arrow record batches"]
+    CDC["JSON change-event files"] --> INVALIDATE["Invalidate cached results"]
+    INVALIDATE --> CACHE
 ```
 
 - 🧠 **Query Engine:** Apache DataFusion — Arrow-native SQL execution
@@ -254,7 +263,7 @@ Igloo's behavior is controlled by a small set of required settings. They can com
     *   **Note:** Both the URI scheme and the keyword/value format (`host=... user=...`) are accepted for the DataFusion Postgres table; the ADBC driver requires the URI scheme.
 
 *   `IGLOO_PARQUET_PATH`:
-    *   **Purpose:** Defines the file system path to the directory containing Parquet files, which represent the Iceberg table data for this project (config file key: `parquet_path`).
+    *   **Purpose:** Defines the file system path to a plain directory containing Parquet files (not an Apache Iceberg table) (config file key: `parquet_path`).
     *   **Example (local):** `./dummy_iceberg_cdc/`
     *   **Example (Docker):** `/app/dummy_iceberg_cdc/` (path inside the Igloo container)
 
@@ -319,7 +328,7 @@ Igloo relies on ADBC C++ drivers (such as the PostgreSQL driver) via Rust's Fore
 ## 📚 Documentation
 
 - [Architecture deep-dive](docs/ARCHITECTURE.md) — module inventory, data flow, and tech-debt notes.
-- CI publishes rustdoc + these docs to GitHub Pages via the `Docs` workflow (an admin must set the repository's Pages Source to "GitHub Actions" once for this to work).
+- The public project website and guides are at [igloodb.github.io](https://igloodb.github.io/). The `Docs` workflow also defines a rustdoc build.
 
 ## 🤝 Contributing
 
